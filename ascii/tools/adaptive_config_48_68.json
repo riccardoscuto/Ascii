@@ -1,0 +1,55 @@
+{
+  "source": "G:/ascii/Nier_Automata_-_Emil_True_Final_Boss_Fight_Secret_Boss_Ending_Y.mp4",
+  "start": 48.0,
+  "end": 68.0,
+  "analysis_fps": 10,
+  "render_fps": 30,
+  "source_fps": 59.94,
+  "frames_dir": "G:/VDGP/ascii/experiments/adaptive/frames10",
+  "reference": {
+    "start": 50.0,
+    "end": 52.2,
+    "shadow": 0.31,
+    "white": 0.95
+  },
+  "pin": {
+    "start": 48.0,
+    "end": 52.2,
+    "shadow": 0.31,
+    "white": 0.95
+  },
+  "limit": 0.06,
+  "flat_bright": {
+    "p10_min": 0.5,
+    "range_max": 0.4,
+    "shadow_offset": -0.06,
+    "white_offset": 0.04
+  },
+  "overrides": [
+    {
+      "start": 59.1,
+      "end": 60.8,
+      "shadow": 0.58,
+      "white": 0.95,
+      "reason": "flat bright orb close-up: lift shadow to separate 2B and rim; keep white at B to avoid dimming"
+    },
+    {
+      "start": 65.0,
+      "end": 66.5,
+      "shadow": 0.31,
+      "white": 0.95,
+      "reason": "early explosion: source retains form, keep B tone"
+    },
+    {
+      "start": 66.5,
+      "end": 68.0,
+      "shadow": 0.58,
+      "white": 0.96,
+      "reason": "late bright explosion: reduce the uniform wall, keep rim/2B highlights"
+    }
+  ],
+  "transitions": {
+    "cut": 2,
+    "soft": 10
+  }
+}

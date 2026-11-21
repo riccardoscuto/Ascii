@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.pyc
+config/obs_ws.json
+tools/obs-portable/
+projects/
+capture_inbox/
+_discovery/
+_backup/
+_tools/
+ascii/render/
+ascii/experiments/
+*.blend1
+*.log
+Thumbs.db
+.DS_Store
