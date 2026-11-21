@@ -33,7 +33,27 @@ python -m gcf gui
 `GamingContentFactory.vbs` is the Windows launcher used on the original machine; it assumes
 the repository is at `G:\VDGP`. Use the `python -m gcf gui` command elsewhere.
 
+## ASCII backend modes
+
+The backend exposes Legacy and Spatial without changing the GUI:
+
+```powershell
+python -m gcf ascii preview --project projects/<id> --mode spatial --variant d --density 81
+python -m gcf ascii still   --project projects/<id> --mode spatial --variant conservative --at 4
+python -m gcf ascii render  --project projects/<id> --mode spatial --variant d --density 81
+```
+
+`legacy` is the approved 96×54 v2 path. `spatial` uses the external 144×81 maps;
+`conservative` is the experimental negative-space variant. `auto` is deliberately rejected
+until the selector gate is approved. See `docs/ASCII_MILESTONE6.md` and
+`docs/ASCII_AUTO_SELECTOR.md`.
+
+The GUI still creates Legacy projects; use the CLI for Spatial until the GUI selector is
+approved and integrated.
+
 ## Documentation
 
 Start with `docs/STATUS.md`. The ASCII renderer notes are in `docs/ASCII_*.md`; the latest
-spatial tone-mapping validation is `docs/ASCII_SPATIAL_MOTION_VALIDATION.md`.
+spatial tone-mapping validation is `docs/ASCII_SPATIAL_MOTION_VALIDATION.md`, with the
+Milestone 6 backend report in `docs/ASCII_MILESTONE6.md` and the selector design in
+`docs/ASCII_AUTO_SELECTOR.md`.

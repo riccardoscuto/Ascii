@@ -5,7 +5,10 @@ from pathlib import Path
 
 from PIL import Image
 
+from gcf.ascii import luma
+
 COLS, ROWS = 80, 45
+RAMP = " .,:;+HW@"
 
 
 def _pct(values, p):
@@ -18,34 +21,33 @@ def _smoothstep(x, a, b):
     return t * t * (3 - 2 * t)
 
 
-def _frames(folder: Path):
-    rows = []
+def _frames(folder: Path, cols: int = COLS, rows: int = ROWS):
+    rows_out = []
     prev = None
     for path in sorted(folder.glob("f_*.png")):
         idx = int(path.stem.split("_")[1])
         t = (idx - 1) / 10.0
-        im = Image.open(path).convert("L")
-        small = im.resize((160, 90), Image.Resampling.BOX)
+        im = Image.open(path).convert("RGB")
+        # Scene/flash detection stays perceptual; tone statistics are linear.
+        small = im.convert("L").resize((160, 90), Image.Resampling.BOX)
         px = small.load()
         vals = [px[x, y] / 255.0 for y in range(90) for x in range(160)]
         hist = [0] * 32
         for v in vals:
             hist[min(31, int(v * 32))] += 1
         hist = [h / len(vals) for h in hist]
-        cells = im.resize((COLS, ROWS), Image.Resampling.BOX)
-        cp = cells.load()
-        cvals = [cp[x, y] / 255.0 for y in range(ROWS) for x in range(COLS)]
+        cvals = luma.linear_cells(im, cols, rows).ravel().tolist()
         hd = dl = 0.0
         if prev:
             hd = sum(abs(a - b) for a, b in zip(hist, prev["hist"])) / 2
             dl = abs(sum(vals) / len(vals) - prev["luma"])
-        rows.append({"t": t, "hd": hd, "dl": dl,
-                     "luma": sum(vals) / len(vals),
-                     "p10": _pct(cvals, 0.10), "p25": _pct(cvals, 0.25),
-                     "p50": _pct(cvals, 0.50), "p95": _pct(cvals, 0.95),
-                     "cells": cvals, "hist": hist})
-        prev = rows[-1]
-    return rows
+        rows_out.append({"t": t, "hd": hd, "dl": dl,
+                         "luma": sum(vals) / len(vals),
+                         "p10": _pct(cvals, 0.10), "p25": _pct(cvals, 0.25),
+                         "p50": _pct(cvals, 0.50), "p95": _pct(cvals, 0.95),
+                         "cells": cvals, "hist": hist})
+        prev = rows_out[-1]
+    return rows_out
 
 
 def _cuts(rows):
@@ -60,9 +62,10 @@ def _cuts(rows):
     return merged
 
 
-def _baseline_plan(project, fps: float, base_shadow: float, base_white: float, write: bool = True) -> dict:
+def _baseline_plan(project, fps: float, base_shadow: float, base_white: float,
+                   analysis_grid: tuple[int, int] = (COLS, ROWS), write: bool = True) -> dict:
     folder = project.path / "analysis"
-    rows = _frames(folder)
+    rows = _frames(folder, *analysis_grid)
     if not rows:
         raise RuntimeError("Analisi tone mapping: nessun frame.")
     cuts = _cuts(rows)
@@ -121,6 +124,7 @@ def _baseline_plan(project, fps: float, base_shadow: float, base_white: float, w
         "cuts": [round(rows[c]["t"], 3) for c in cuts],
         "intervals": intervals,
         "keyframes": keys,
+        "analysis_grid": [int(analysis_grid[0]), int(analysis_grid[1])],
         "note": "Generic adaptive plan: per-shot stats blended 60/40 with the preset base; no Nier overrides.",
     }
     if write:
@@ -132,9 +136,12 @@ def _baseline_plan(project, fps: float, base_shadow: float, base_white: float, w
 
 
 def build_plan(project, fps: float, base_shadow: float, base_white: float,
-               auto: bool = False, overrides=None) -> dict:
+               auto: bool = False, overrides=None,
+               analysis_grid: tuple[int, int] = (COLS, ROWS), ramp: str = RAMP) -> dict:
     if auto:
         from gcf.ascii.correction import build_auto_plan
-        base = _baseline_plan(project, fps, base_shadow, base_white, write=False)
-        return build_auto_plan(project, fps, base, overrides)
-    return _baseline_plan(project, fps, base_shadow, base_white)
+        base = _baseline_plan(project, fps, base_shadow, base_white,
+                              analysis_grid=analysis_grid, write=False)
+        return build_auto_plan(project, fps, base, overrides, grid=analysis_grid, ramp=ramp)
+    return _baseline_plan(project, fps, base_shadow, base_white,
+                          analysis_grid=analysis_grid)

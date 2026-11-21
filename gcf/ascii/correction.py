@@ -5,11 +5,17 @@ import math
 import subprocess
 from pathlib import Path
 
+import numpy as np
 from PIL import Image, ImageFilter, ImageStat
+
+from gcf.ascii import luma
 
 COLS, ROWS = 96, 54
 RAMP = " .,:;+HW@"
 INDEX_MAX = len(RAMP) - 1
+LINEAR_DARK = luma.srgb_to_linear(0.345)
+LINEAR_LOCAL = luma.srgb_to_linear(0.04)
+LINEAR_EDGE = luma.srgb_to_linear(0.05)
 
 # The look actually produced by the current adaptive plan (v2 baseline).
 BASE = {"shadow": 0.234, "white": 0.91, "gamma": 0.82,
@@ -30,10 +36,10 @@ def _clamp(value, low, high):
 
 
 def _pct(sorted_values, p):
-    return sorted_values[min(len(sorted_values) - 1, int(p * len(sorted_values)))] / 255.0
+    return sorted_values[min(len(sorted_values) - 1, int(p * len(sorted_values)))]
 
 
-def _mapped_index(value, params):
+def _mapped_index(value, params, index_max=INDEX_MAX):
     span = max(1e-6, params["white"] - params["shadow"])
     x = (value - params["shadow"]) / span
     if x <= 0:
@@ -47,17 +53,18 @@ def _mapped_index(value, params):
         return 0
     if c >= 1:
         c = 1.0
-    return int(round(c * INDEX_MAX))
+    return int(round(c * index_max))
 
 
-def _simulate(cells, spread, params):
+def _simulate(cells, spread, params, cols=COLS, rows=ROWS, index_max=INDEX_MAX):
     visible = dense = saturated = edges = edge_visible = dark_detail = 0
     total = len(cells)
     values = []
-    blocks = [[0, 0] for _ in range(48)]
+    bx_count = max(1, cols // 12)
+    by_count = max(1, rows // 9)
+    blocks = [[0, 0] for _ in range(bx_count * by_count)]
     for i, (value, local) in enumerate(zip(cells, spread)):
-        v = value / 255.0
-        idx = _mapped_index(v, params)
+        idx = _mapped_index(float(value), params, index_max)
         values.append(idx)
         if idx >= 1:
             visible += 1
@@ -65,15 +72,15 @@ def _simulate(cells, spread, params):
             dense += 1
         if idx >= 6:
             saturated += 1
-        if v < 0.345 and local / 255.0 > 0.04:
+        if value < LINEAR_DARK and local > LINEAR_LOCAL:
             dark_detail += 1
-        if local / 255.0 >= 0.05:
+        if local >= LINEAR_EDGE:
             edges += 1
             if idx >= 1:
                 edge_visible += 1
-        bx = (i % COLS) // 12
-        by = (i // COLS) // 9
-        block = blocks[by * 8 + bx]
+        bx = (i % cols) * bx_count // cols
+        by = (i // cols) * by_count // rows
+        block = blocks[by * bx_count + bx]
         block[1] += 1
         if idx >= 1:
             block[0] += 1
@@ -82,7 +89,7 @@ def _simulate(cells, spread, params):
     fractions = [c / n for c, n in blocks]
     occupied = sum(fractions)
     entropy = 0.0
-    if occupied:
+    if occupied and len(fractions) > 1:
         for fraction in fractions:
             if fraction > 0:
                 p = fraction / occupied
@@ -102,48 +109,51 @@ def _simulate(cells, spread, params):
     }
 
 
-def _frame_stats(path: Path):
+def _frame_stats(path: Path, cols: int = COLS, rows: int = ROWS, ramp: str = RAMP):
     im = Image.open(path).convert("RGB")
+    lum = luma.linear_luma_array(im)
+    cells = luma.linear_cells(im, cols, rows).ravel()
+    spread_full = luma.local_range(lum, 1)
+    spread_img = Image.fromarray(spread_full, mode="F").resize(
+        (cols, rows), Image.Resampling.BOX)
+    spread = np.asarray(spread_img, dtype=np.float32).ravel()
+
+    # Perceptual metrics remain in display space for cut/flash detection.
     gray = im.convert("L")
-    cells_img = gray.resize((COLS, ROWS), Image.Resampling.BOX)
-    cells = cells_img.tobytes()
-    hi = gray.filter(ImageFilter.MaxFilter(3)).resize((COLS, ROWS), Image.Resampling.BOX).tobytes()
-    lo = gray.filter(ImageFilter.MinFilter(3)).resize((COLS, ROWS), Image.Resampling.BOX).tobytes()
-    spread = bytes(max(0, a - b) for a, b in zip(hi, lo))
-    values = sorted(cells)
+    small = gray.resize((160, 90), Image.Resampling.BOX)
+    vals = [p / 255.0 for p in small.getdata()]
     hist = [0] * 32
-    for value in cells:
-        hist[min(31, value // 8)] += 1
-    total = len(cells)
-    hist = [h / total for h in hist]
+    for value in vals:
+        hist[min(31, int(value * 32))] += 1
+    hist = [h / len(vals) for h in hist]
     edge_hist = gray.filter(ImageFilter.FIND_EDGES).histogram()
     edge_density = sum(edge_hist[24:]) / (gray.width * gray.height)
-    gray_hist = gray.histogram()
-    dark = sum(gray_hist[:11]) / (gray.width * gray.height)
-    clipped = sum(gray_hist[250:]) / (gray.width * gray.height)
-    sat = ImageStat.Stat(im.convert("HSV").getchannel("S")).mean[0] / 255.0
+
+    values = np.sort(cells)
+    total = len(cells)
     return {
         "cells": cells,
         "spread": spread,
         "hist": hist,
-        "p5": _pct(values, 0.05),
-        "p10": _pct(values, 0.10),
-        "p25": _pct(values, 0.25),
-        "p50": _pct(values, 0.50),
-        "p95": _pct(values, 0.95),
-        "mean": sum(cells) / (255.0 * total),
+        "p5": float(_pct(values, 0.05)),
+        "p10": float(_pct(values, 0.10)),
+        "p25": float(_pct(values, 0.25)),
+        "p50": float(_pct(values, 0.50)),
+        "p95": float(_pct(values, 0.95)),
+        "mean": sum(vals) / len(vals),
         "edge": edge_density,
-        "sat": sat,
-        "dark": dark,
-        "clipped": clipped,
+        "sat": ImageStat.Stat(im.convert("HSV").getchannel("S")).mean[0] / 255.0,
+        "dark": float(np.mean(lum < luma.srgb_to_linear(11 / 255))),
+        "clipped": float(np.mean(lum > luma.srgb_to_linear(250 / 255))),
+        "index_max": len(ramp) - 1,
     }
 
 
-def _need(sample, baseline):
+def _need(sample, baseline, cols=COLS, rows=ROWS, ramp=RAMP):
     """How much this sample needs help, using tone, dark detail and density."""
-    stats = _simulate(sample["cells"], sample["spread"], baseline)
+    stats = _simulate(sample["cells"], sample["spread"], baseline, cols, rows, len(ramp) - 1)
     visible = stats["visible"]
-    if sample["p95"] < 0.045 or sample["edge"] < 0.008:
+    if sample["p95"] < luma.srgb_to_linear(0.045) or sample["edge"] < 0.008:
         return 0.0, stats, "no_detail"
     if visible >= 0.28:
         visible_need = 0.0
@@ -169,7 +179,7 @@ def _need(sample, baseline):
 
 def _target(sample):
     p10, p50, p95 = sample["p10"], sample["p50"], sample["p95"]
-    if p50 >= 0.18:
+    if p50 >= luma.srgb_to_linear(0.18):
         # Medium/HDR scene: lift the dark half, compress highlights, keep black.
         shadow = _clamp(p10 * 0.85 + 0.07, 0.08, 0.18)
         white = _clamp(p95 * 1.2, 0.70, 0.95)
@@ -182,7 +192,7 @@ def _target(sample):
         shadow = _clamp(p10 * 0.85, 0.01, 0.20)
         white = _clamp(max(0.30, p95 * 1.15), shadow + 0.14, 0.95)
         gamma = _clamp(0.82 + (0.25 - p50) * 0.5, 0.82, 0.95)
-        low = _clamp(0.03 if p50 < 0.12 else 0.06, 0.02, 0.12)
+        low = _clamp(0.03 if p50 < luma.srgb_to_linear(0.12) else 0.06, 0.02, 0.12)
         high = 0.85
         local = _clamp(0.24 + (0.20 - p50) * 0.6, 0.24, 0.36)
     return {"shadow": shadow, "white": white, "gamma": gamma,
@@ -285,13 +295,15 @@ def _hist16(data):
     return [h / total for h in hist]
 
 
-def build_auto_plan(project, fps: float, base_plan: dict, overrides=None) -> dict:
+def build_auto_plan(project, fps: float, base_plan: dict, overrides=None,
+                    grid=(COLS, ROWS), ramp=RAMP) -> dict:
+    grid_cols, grid_rows = grid
     frames = sorted((project.path / "analysis").glob("f_*.png"))
     if not frames:
         raise RuntimeError("Analisi correzione: nessun frame.")
     samples = []
     for index, path in enumerate(frames):
-        data = _frame_stats(path)
+        data = _frame_stats(path, grid_cols, grid_rows, ramp)
         data["t"] = round(index / 10.0, 3)
         samples.append(data)
 
@@ -340,7 +352,7 @@ def build_auto_plan(project, fps: float, base_plan: dict, overrides=None) -> dic
     reasons = []
     for sample in samples:
         baseline = baseline_at(sample["t"])
-        need, stats, reason = _need(sample, baseline)
+        need, stats, reason = _need(sample, baseline, grid_cols, grid_rows, ramp)
         target = _target(sample)
         final = _mix(baseline, target, need)
         raw.append(final)
@@ -398,7 +410,7 @@ def build_auto_plan(project, fps: float, base_plan: dict, overrides=None) -> dic
     flagged = []
     flicker = 0.0
     for i, sample in enumerate(samples):
-        stats = _simulate(sample["cells"], sample["spread"], smooth[i])
+        stats = _simulate(sample["cells"], sample["spread"], smooth[i], grid_cols, grid_rows, len(ramp) - 1)
         base = base_stats[i]
         flags = []
         if i in flash:
@@ -529,6 +541,8 @@ def build_auto_plan(project, fps: float, base_plan: dict, overrides=None) -> dic
         "duration": project.working_info["duration"],
         "total_frames": total_frames,
         "render_fps": 30,
+        "analysis_grid": [int(grid_cols), int(grid_rows)],
+        "ramp": ramp,
         "frame_scale": round(fps / 30.0, 6),
         "frame_offset": round(1.0 - fps / 30.0, 6),
         "base": {"shadow": base_plan["keyframes"][0]["shadow"],

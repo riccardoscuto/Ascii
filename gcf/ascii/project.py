@@ -29,6 +29,13 @@ class AsciiProject:
     interval_duration: float | None = None  # None = full source
     preset: str = "ASCII_Cinematic_Balanced_v2_96x54"
     params: dict = field(default_factory=lambda: dict(DEFAULT_PARAMS))
+    ascii_mode: str = "legacy"
+    spatial_variant: str = "d"
+    spatial: dict = field(default_factory=dict)
+    grid: dict = field(default_factory=dict)
+    overrides: object = field(default_factory=dict)
+    timings: dict = field(default_factory=dict)
+    renderer_version: str = ""
     source_info: dict = field(default_factory=dict)
     working_info: dict = field(default_factory=dict)
     working_source: str = ""
@@ -51,7 +58,9 @@ class AsciiProject:
 
     @classmethod
     def create(cls, source: str, fmt: str, start: float, duration: float | None,
-               params: dict | None = None, title: str = "ASCII Video") -> "AsciiProject":
+               params: dict | None = None, title: str = "ASCII Video",
+               ascii_mode: str = "legacy", spatial_variant: str = "d",
+               overrides: dict | None = None) -> "AsciiProject":
         root = ROOT / "projects"
         root.mkdir(parents=True, exist_ok=True)
         base = "ascii_" + datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -70,6 +79,9 @@ class AsciiProject:
             interval_start=max(0.0, float(start)),
             interval_duration=duration,
             params={**DEFAULT_PARAMS, **(params or {})},
+            ascii_mode=ascii_mode,
+            spatial_variant=spatial_variant,
+            overrides=overrides or {},
             created_at=datetime.now().isoformat(timespec="seconds"),
         )
         p.ensure_dirs()

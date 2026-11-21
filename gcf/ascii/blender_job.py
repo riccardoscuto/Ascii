@@ -72,6 +72,43 @@ def main():
                       "Cell Sample C Offset": (-du, dv, 0.0), "Cell Sample D Offset": (du, dv, 0.0)}.items():
         ng.nodes[name].inputs[1].default_value = vec
 
+    ascii_mode = job.get("ascii_mode", "legacy")
+    spatial_info = job.get("spatial") or {}
+    index_first = None
+    index_count = 0
+    if ascii_mode == "spatial":
+        index_dir = Path(spatial_info["index_dir"])
+        index_files = sorted(index_dir.glob("i_*.png"))
+        required = int(job.get("index_required", job["total_frames"]))
+        if len(index_files) < required:
+            raise RuntimeError(f"Index sequence incomplete: {len(index_files)}/{required}")
+        index_first = index_files[0]
+        index_img = bpy.data.images.load(str(index_first), check_existing=False)
+        index_img.source = "SEQUENCE"
+        try:
+            index_img.frame_duration = len(index_files)
+        except Exception:
+            pass
+        index_img.colorspace_settings.name = "Non-Color"
+        index_count = len(index_files)
+        index_node = ng.nodes.new("GeometryNodeImageTexture")
+        index_node.name = "Index Map"
+        index_node.inputs[0].default_value = index_img
+        index_node.interpolation = "Closest"
+        index_node.extension = "CLIP"
+        ng.links.new(ng.nodes["UV Offset"].outputs["Vector"], index_node.inputs[1])
+        index_node.inputs[2].default_value = 1
+        ng.links.new(ng.nodes["Scene Time"].outputs["Frame"], index_node.inputs[2])
+        dot_index = ng.nodes.new("ShaderNodeVectorMath")
+        dot_index.name = "Index Red"
+        dot_index.operation = "DOT_PRODUCT"
+        dot_index.inputs[1].default_value = (1.0, 0.0, 0.0)
+        ng.links.new(index_node.outputs["Color"], dot_index.inputs[0])
+        mr = ng.nodes["Map Range.001"]
+        for link in list(mr.inputs[0].links):
+            ng.links.remove(link)
+        ng.links.new(dot_index.outputs["Value"], mr.inputs[0])
+
     scene.render.engine = "BLENDER_EEVEE"
     scene.eevee.taa_render_samples = 8
     scene.render.resolution_x = job["resolution"][0]
@@ -149,6 +186,15 @@ def main():
         "checks": checks,
         "scene_fps": scene.render.fps,
         "mode": job["mode"],
+        "ascii_mode": ascii_mode,
+        "spatial_variant": job.get("spatial_variant", ""),
+        "renderer_version": job.get("renderer_version", ""),
+        "map_key": spatial_info.get("map_key", ""),
+        "index": str(index_first) if index_first else "",
+        "index_first": index_first.name if index_first else "",
+        "index_count": index_count,
+        "index_colorspace": "Non-Color" if index_first else "",
+        "index_required": int(job.get("index_required", total)),
     }
     verification = Path(job["verification"])
     verification.parent.mkdir(parents=True, exist_ok=True)

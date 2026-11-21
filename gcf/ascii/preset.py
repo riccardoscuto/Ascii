@@ -19,7 +19,7 @@ def load_preset() -> dict:
 
 
 def grid_for(format_: str, density: int) -> dict:
-    density = max(32, min(80, int(density)))
+    density = max(32, min(160, int(density)))
     if format_ == "vertical":
         cols = density
         rows = round(density * 16 / 9)

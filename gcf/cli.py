@@ -20,6 +20,9 @@ from gcf.capture.takes import (
     write_take_metadata,
 )
 from gcf.config import ROOT, ffmpeg_bin, ffprobe_bin, project_dir
+from gcf.ascii.project import AsciiProject
+from gcf.ascii import preset as ascii_preset
+from gcf.ascii import render as ascii_render
 from gcf.guess.cover import build_cover
 from gcf.guess.round import InsufficientMaterial
 from gcf.guess.short import build_game_round, build_short
@@ -255,6 +258,48 @@ def cmd_gui(_args) -> None:
     run()
 
 
+def _ascii_project(args) -> AsciiProject:
+    project = AsciiProject.load(Path(args.project))
+    project.ascii_mode = args.mode
+    project.spatial_variant = args.variant
+    if args.density:
+        project.params["density"] = int(args.density)
+    elif args.mode == "spatial" and int(project.params.get("density", 54)) < 81:
+        project.params["density"] = 81
+    project.save()
+    return project
+
+
+def _ascii_progress(done, total, elapsed, eta, stage):
+    if total <= 0:
+        print(f"{stage}...")
+        return
+    if done == total or done == 1 or done % 30 == 0:
+        print(f"{stage}: {done}/{total} frame, {elapsed:.0f}s")
+
+
+def cmd_ascii_preview(args) -> None:
+    project = _ascii_project(args)
+    out = ascii_render.preview(project, _ascii_progress)
+    print("preview:", out)
+
+
+def cmd_ascii_still(args) -> None:
+    project = _ascii_project(args)
+    out = ascii_render.still(project, args.at, _ascii_progress)
+    print("still:", out)
+
+
+def cmd_ascii_render(args) -> None:
+    project = _ascii_project(args)
+    out = ascii_render.render(project, _ascii_progress)
+    print("master:", out["master"])
+    print("youtube:", out["youtube"])
+    print("mode:", project.ascii_mode, "variant:", project.spatial_variant,
+          "grid:", ascii_preset.grid_for(project.format, int(project.params["density"])))
+    print("timings:", project.timings)
+
+
 def cmd_guess_short(args) -> None:
     manifest = build_short(
         args.project,
@@ -356,6 +401,29 @@ def build_parser() -> argparse.ArgumentParser:
     gui = sub.add_parser("gui", help="Gaming Content Factory desktop app")
     gui.set_defaults(func=cmd_gui)
 
+    asc = sub.add_parser("ascii", help="ASCII backend (Legacy / Spatial)")
+    asc_sub = asc.add_subparsers(dest="action", required=True)
+
+    def ascii_common(sp):
+        sp.add_argument("--project", required=True)
+        sp.add_argument("--mode", choices=["legacy", "spatial", "auto"], default="legacy")
+        sp.add_argument("--variant", choices=["d", "conservative", "global"], default="d")
+        sp.add_argument("--density", type=int, default=None,
+                        help="griglia: 81 = 144x81 orizzontale")
+
+    ap = asc_sub.add_parser("preview", help="anteprima 4 s")
+    ascii_common(ap)
+    ap.set_defaults(func=cmd_ascii_preview)
+
+    ast = asc_sub.add_parser("still", help="frame singolo")
+    ascii_common(ast)
+    ast.add_argument("--at", type=float, default=0.0)
+    ast.set_defaults(func=cmd_ascii_still)
+
+    ar = asc_sub.add_parser("render", help="rendering completo")
+    ascii_common(ar)
+    ar.set_defaults(func=cmd_ascii_render)
+
     return p
 
 
@@ -364,6 +432,8 @@ def main() -> None:
     try:
         args.func(args)
     except InsufficientMaterial as exc:
+        raise SystemExit(str(exc)) from None
+    except RuntimeError as exc:
         raise SystemExit(str(exc)) from None
 
 

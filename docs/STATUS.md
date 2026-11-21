@@ -493,3 +493,10 @@ Verificare copertina, numero, reveal e transizione su `_discovery/graphics_test_
 - Benchmark: 96 0,19 s/frame; 144 0,20; 192 0,23. La griglia non e il collo di bottiglia.
 - Serve una correzione tonale locale o due livelli, non altra griglia/emissione. Dettagli in ``docs/ASCII_ADAPTIVE_GLYPH.md``.
 
+## Milestone 6 — Spatial backend e D-Conservative (2026-11-21)
+
+- Spatial D e D-Conservative integrati in `gcf/ascii/` con cache, manifest, modalita Legacy/Spatial e guard sugli indici 0-255.
+- NieR 48-58 s: C 144 Spatial senza celle vuote; D-Conservative 31.9% celle vuote, 0 frame neri; A 96 approvato invariato come riferimento.
+- Villaggio: Spatial piu denso e leggibile. Scuro: Spatial respinto (quasi nero); M3/M4 Legacy resta la soluzione.
+- Auto non implementata: progetto in `docs/ASCII_AUTO_SELECTOR.md`; nessuna GUI modificata.
+- Dettagli e metriche: `docs/ASCII_MILESTONE6.md`.

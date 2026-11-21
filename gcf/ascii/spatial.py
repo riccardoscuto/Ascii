@@ -1,0 +1,382 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import math
+import subprocess
+import time
+from datetime import datetime
+from pathlib import Path
+
+import numpy as np
+from PIL import Image
+
+from gcf.ascii import luma
+from gcf.ascii.preset import PRESET_BLEND
+
+RENDERER_VERSION = "spatial-1"
+DEFAULT_RAMP = " .,:;+HW@"
+SPATIAL = {"radius": 4, "sigma_s": 2.5, "sigma_r": 0.08,
+           "index_floor": 0.008, "index_span": 0.392, "index_gamma": 0.80}
+D_CONSERVATIVE = {"radius": 2, "empty_below": 0.35, "reduce_below": 0.65,
+                  "luma_lo": 1.8, "luma_hi": 2.8}
+ASCII_MODES = ("legacy", "spatial", "auto")
+SPATIAL_VARIANTS = ("d", "conservative", "global")
+
+
+def _sha1(path: Path) -> str:
+    h = hashlib.sha1()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def _json_sha1(value) -> str:
+    return hashlib.sha1(json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def encoded_levels(ramp: str = DEFAULT_RAMP) -> tuple[int, ...]:
+    n = max(1, len(ramp) - 1)
+    return tuple(sorted({int(round(min(1.0, i / n + 0.001) * 255)) for i in range(n + 1)}))
+
+
+def encode_index(idx: np.ndarray, ramp: str = DEFAULT_RAMP) -> Image.Image:
+    n = max(1, len(ramp) - 1)
+    values = np.rint(np.minimum(1.0, idx / n + 0.001) * 255).astype(np.uint8)
+    return Image.fromarray(values, mode="L")
+
+
+def smoothstep(x, a, b):
+    if b <= a:
+        return (x >= a).astype(np.float32)
+    t = np.clip((x - a) / (b - a), 0.0, 1.0)
+    return (t * t * (3.0 - 2.0 * t)).astype(np.float32)
+
+
+def bilateral(L: np.ndarray, radius: int = 4, sigma_s: float = 2.5,
+              sigma_r: float = 0.08) -> np.ndarray:
+    """Edge-aware local mean on the cell grid."""
+    h, w = L.shape
+    pad = np.pad(L, radius, mode="edge")
+    acc = np.zeros_like(L, dtype=np.float32)
+    wsum = np.zeros_like(L, dtype=np.float32)
+    ss = 2.0 * sigma_s * sigma_s
+    sr = 2.0 * sigma_r * sigma_r
+    for dy in range(-radius, radius + 1):
+        for dx in range(-radius, radius + 1):
+            near = pad[radius + dy:radius + dy + h, radius + dx:radius + dx + w]
+            ds = float(dx * dx + dy * dy)
+            dr = (near - L) ** 2
+            wt = np.exp(-ds / ss - dr / sr).astype(np.float32)
+            acc += near * wt
+            wsum += wt
+    return (acc / np.maximum(wsum, 1e-8)).astype(np.float32)
+
+
+def tone_at(plan: dict, frame: int, data: dict) -> dict:
+    keys = plan.get("keyframes") or []
+    shadow, white = data["shadow"], data["white"]
+    if keys:
+        if frame <= keys[0]["frame"]:
+            shadow, white = keys[0]["shadow"], keys[0]["white"]
+        elif frame >= keys[-1]["frame"]:
+            shadow, white = keys[-1]["shadow"], keys[-1]["white"]
+        else:
+            for a, b in zip(keys, keys[1:]):
+                if a["frame"] <= frame <= b["frame"]:
+                    t = (frame - a["frame"]) / max(1, b["frame"] - a["frame"])
+                    shadow = a["shadow"] + (b["shadow"] - a["shadow"]) * t
+                    white = a["white"] + (b["white"] - a["white"]) * t
+                    break
+    return {"shadow": float(shadow), "white": float(white),
+            "gamma": float(data["gamma"]), "contrast_low": float(data["contrast_low"]),
+            "contrast_high": float(data["contrast_high"]),
+            "local_contrast": float(data["local_contrast"])}
+
+
+def global_index(cells: np.ndarray, centre: np.ndarray, tone: dict,
+                 ramp: str = DEFAULT_RAMP) -> np.ndarray:
+    local = cells + tone["local_contrast"] * (centre - cells)
+    span = max(1e-6, tone["white"] - tone["shadow"])
+    x = np.clip((local - tone["shadow"]) / span, 0.0, 1.0) ** tone["gamma"]
+    span = max(1e-6, tone["contrast_high"] - tone["contrast_low"])
+    c = np.clip((x - tone["contrast_low"]) / span, 0.0, 1.0)
+    return np.rint(c * (len(ramp) - 1)).astype(np.uint8), (c * 255.0).astype(np.uint8)
+
+
+def spatial_index(cells: np.ndarray, base: np.ndarray, target: float,
+                  ramp: str = DEFAULT_RAMP, conservative: bool = False,
+                  stats: dict | None = None):
+    detail = cells - base
+    gain = np.clip((target / np.maximum(base, 0.002)) ** 0.5, 0.45, 4.0)
+    gate = smoothstep(np.abs(detail), 0.008, 0.045)
+    gain = 1.0 + (gain - 1.0) * gate
+    v = np.clip(base * gain + detail, 0.0, 1.0)
+    c = np.clip((v - SPATIAL["index_floor"]) / SPATIAL["index_span"], 0.0, 1.0) ** SPATIAL["index_gamma"]
+    idx = np.rint(c * (len(ramp) - 1)).astype(np.uint8)
+    tone = (v * 255.0).astype(np.uint8)
+    if not conservative:
+        return idx, tone
+    st = stats or {}
+    edge_p50 = float(st.get("edge_p50", 0.02))
+    edge_p85 = float(st.get("edge_p85", 0.08))
+    std_p50 = float(st.get("std_p50", 0.004))
+    std_p85 = float(st.get("std_p85", 0.02))
+    edge_rel = np.abs(detail) / np.maximum(base, 0.002)
+    local = luma.local_std(cells, D_CONSERVATIVE["radius"])
+    keep = np.maximum.reduce([
+        smoothstep(edge_rel, edge_p50, edge_p85),
+        smoothstep(local, std_p50, std_p85),
+        smoothstep(v, target * D_CONSERVATIVE["luma_lo"], target * D_CONSERVATIVE["luma_hi"]),
+    ])
+    out = idx.copy()
+    out[keep < D_CONSERVATIVE["empty_below"]] = 0
+    mid = (keep >= D_CONSERVATIVE["empty_below"]) & (keep < D_CONSERVATIVE["reduce_below"])
+    out[mid] = np.maximum(0, idx[mid].astype(np.int16) - 1).astype(np.uint8)
+    # Bright/high-contrast glyphs are never removed by the negative-space pass.
+    out[idx >= (len(ramp) - 2)] = idx[idx >= (len(ramp) - 2)]
+    return out, tone
+
+
+def analysis_stats(project, data: dict, plan: dict) -> dict:
+    """Target and local-structure percentiles from the 10 fps analysis frames."""
+    frames = sorted((project.path / "analysis").glob("f_*.png"))
+    if not frames:
+        raise RuntimeError("Spatial analysis: nessun frame di analisi.")
+    step = max(1, len(frames) // 300)
+    frames = frames[::step]
+    medians = []
+    edges = []
+    stds = []
+    for path in frames:
+        im = Image.open(path).convert("RGB")
+        cells, centre = luma.linear_luma_cell_samples(im, data["grid"]["cols"], data["grid"]["rows"])
+        base = bilateral(cells)
+        medians.append(float(np.median(cells)))
+        detail = np.abs(cells - base) / np.maximum(base, 0.002)
+        edges.append(detail.ravel())
+        stds.append(luma.local_std(cells, D_CONSERVATIVE["radius"]).ravel())
+    edge = np.concatenate(edges)
+    std = np.concatenate(stds)
+    return {
+        "target": float(np.median(medians)),
+        "p50": float(np.median(np.concatenate([np.array([m]) for m in medians]))),
+        "edge_p50": float(np.percentile(edge, 50)),
+        "edge_p85": float(np.percentile(edge, 85)),
+        "std_p50": float(np.percentile(std, 50)),
+        "std_p85": float(np.percentile(std, 85)),
+        "analysis_frames": len(frames),
+    }
+
+
+def _map_params(data: dict, plan: dict, kind: str, conservative: bool, stats: dict) -> dict:
+    return {
+        "renderer_version": RENDERER_VERSION,
+        "grid": [data["grid"]["cols"], data["grid"]["rows"]],
+        "ramp": data["ramp"],
+        "kind": kind,
+        "conservative": bool(conservative),
+        "spatial": SPATIAL,
+        "conservative_params": D_CONSERVATIVE,
+        "target": stats["target"],
+        "stats": stats,
+        "tone": {k: data[k] for k in ("gamma", "shadow", "white", "contrast_low",
+                                       "contrast_high", "local_contrast")},
+        "plan_keyframes": plan.get("keyframes", []),
+        "plan_cuts": plan.get("cuts", []),
+    }
+
+
+def map_key(project, data: dict, plan: dict, kind: str, conservative: bool,
+            stats: dict) -> str:
+    payload = {
+        "source": _sha1(Path(project.working_source)),
+        "preset": _sha1(PRESET_BLEND),
+        "params": _map_params(data, plan, kind, conservative, stats),
+    }
+    return _json_sha1(payload)
+
+
+def _manifest_valid(folder: Path, manifest: dict, end: int, data: dict,
+                    kind: str, conservative: bool) -> bool:
+    if not manifest or manifest.get("renderer_version") != RENDERER_VERSION:
+        return False
+    if manifest.get("kind") != kind or bool(manifest.get("conservative")) != bool(conservative):
+        return False
+    if manifest.get("grid") != [data["grid"]["cols"], data["grid"]["rows"]]:
+        return False
+    if manifest.get("ramp") != data["ramp"]:
+        return False
+    if int(manifest.get("frames", 0)) < end:
+        return False
+    return len(list((folder / "idx").glob("i_*.png"))) >= end
+
+
+def validate_index_maps(folder: Path, end: int, cols: int, rows: int,
+                        ramp: str = DEFAULT_RAMP) -> dict:
+    expected = set(encoded_levels(ramp))
+    files = sorted((folder / "idx").glob("i_*.png"))
+    if len(files) < end:
+        raise RuntimeError(f"Indici mancanti: {len(files)}/{end}")
+    levels = set()
+    for path in files[:end]:
+        im = Image.open(path).convert("L")
+        if im.size != (cols, rows):
+            raise RuntimeError(f"Griglia indice errata: {path.name} {im.size}")
+        levels.update(im.getdata())
+    extra = sorted(v for v in levels if v not in expected)
+    if extra:
+        raise RuntimeError(f"Indici fuori codifica 0–255: {extra[:12]}")
+    return {"levels": sorted(levels), "frames": end}
+
+
+def validate_renders(frames_dir: Path, maps_dir: Path, end: int, cols: int, rows: int,
+                     sample_step: int = 1) -> dict:
+    """Black-frame and index/render alignment guard."""
+    issues = []
+    checked = 0
+    step = max(1, int(sample_step))
+    for i in range(1, end + 1, step):
+        frame = frames_dir / f"f_{i:04d}.png"
+        index = maps_dir / "idx" / f"i_{i:04d}.png"
+        if not frame.exists() or not index.exists():
+            issues.append(f"frame/indice mancante: {i}")
+            continue
+        ren = Image.open(frame).convert("L")
+        h = ren.histogram()
+        mean = sum(k * c for k, c in enumerate(h)) / max(1, ren.width * ren.height)
+        hi = max(i for i, c in enumerate(h) if c)
+        idx = Image.open(index).convert("L")
+        cells = idx.getdata()
+        occupied = sum(1 for v in cells if v) / max(1, idx.width * idx.height)
+        if occupied > 0.02 and hi < 8:
+            issues.append(f"frame nero non giustificato: {i} max={hi}")
+        if occupied > 0.02 and mean < 0.75:
+            issues.append(f"render quasi nero: {i} mean={mean:.3f}")
+        if occupied > 0.10 and mean >= 0.5:
+            small = ren.resize((cols, rows), Image.Resampling.BOX)
+            values = list(small.getdata())
+            index_values = list(idx.getdata())
+            mv = sum(values) / len(values)
+            mi = sum(index_values) / len(index_values)
+            num = sum((a - mv) * (b - mi) for a, b in zip(values, index_values))
+            den = (sum((a - mv) ** 2 for a in values)
+                   * sum((b - mi) ** 2 for b in index_values)) ** 0.5
+            if den and num / den < 0.25:
+                issues.append(f"mappa/render disallineati: frame {i}")
+        checked += 1
+    if issues:
+        raise RuntimeError("; ".join(issues[:12]))
+    return {"checked": checked, "issues": []}
+
+
+def ensure_maps(project, data: dict, plan: dict, end: int, kind: str = "spatial",
+                conservative: bool = False, progress=None, cancel=None,
+                start: int = 1) -> dict:
+    """Generate or reuse deterministic tone/index maps for render frames."""
+    if kind not in ("global", "spatial", "conservative"):
+        raise ValueError(f"Tipo mappa non valido: {kind}")
+    if end < 1:
+        raise ValueError("Intervallo mappe vuoto.")
+    stats = analysis_stats(project, data, plan) if kind != "global" else {
+        "target": 0.0, "p50": 0.0, "edge_p50": 0.0, "edge_p85": 0.0,
+        "std_p50": 0.0, "std_p85": 0.0, "analysis_frames": 0,
+    }
+    key = map_key(project, data, plan, kind, conservative, stats)
+    root = project.path / "temp" / "spatial" / key
+    idx_dir = root / "idx"
+    tone_dir = root / "tone"
+    idx_dir.mkdir(parents=True, exist_ok=True)
+    tone_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {}
+    if _manifest_valid(root, manifest, end, data, kind, conservative):
+        try:
+            validate_index_maps(root, end, data["grid"]["cols"], data["grid"]["rows"], data["ramp"])
+            project.spatial = {"key": key, "dir": str(root), "manifest": str(manifest_path),
+                               "index_root": manifest["index_root"], "frames": end,
+                               "kind": kind, "conservative": conservative, "target": stats["target"]}
+            project.save()
+            return manifest
+        except RuntimeError:
+            # Corrupt/legacy 0–8 maps must never be reused.
+            for old in list(idx_dir.glob("*.png")) + list(tone_dir.glob("*.png")):
+                old.unlink(missing_ok=True)
+            manifest = {}
+
+    cols, rows = data["grid"]["cols"], data["grid"]["rows"]
+    w, h = data["resolution"]
+    source = str(project.working_source)
+    cmd = ["ffmpeg", "-v", "error", "-i", source, "-vf", f"fps=30,scale={w}:{h}",
+           "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]
+    from gcf.config import ffmpeg_bin
+    cmd[0] = ffmpeg_bin()
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    frame_bytes = w * h * 3
+    started = time.time()
+    done = 0
+    try:
+        for frame in range(1, end + 1):
+            buf = proc.stdout.read(frame_bytes)
+            if len(buf) != frame_bytes:
+                raise RuntimeError(f"Sorgente esaurita al frame {frame}.")
+            if frame < start:
+                continue
+            out_idx = idx_dir / f"i_{frame:04d}.png"
+            out_tone = tone_dir / f"t_{frame:04d}.png"
+            if not (out_idx.exists() and out_tone.exists()):
+                im = Image.frombytes("RGB", (w, h), buf)
+                cells, centre = luma.linear_luma_cell_samples(im, cols, rows)
+                if kind == "global":
+                    idx, tone = global_index(cells, centre, tone_at(plan, frame, data), data["ramp"])
+                else:
+                    base = bilateral(cells)
+                    idx, tone = spatial_index(cells, base, stats["target"], data["ramp"],
+                                              conservative=conservative, stats=stats)
+                encode_index(idx, data["ramp"]).save(out_idx)
+                Image.fromarray(tone, mode="L").save(out_tone)
+            done += 1
+            if progress and (done % 3 == 0 or frame == end):
+                elapsed = time.time() - started
+                total = max(1, end - start + 1)
+                eta = elapsed * (total - done) / done if done else None
+                progress(done, total, elapsed, eta, "Mappe spaziali")
+            if cancel is not None and cancel.is_set():
+                raise RuntimeError("Generazione mappe interrotta.")
+    finally:
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+    validate_index_maps(root, end, cols, rows, data["ramp"])
+    h = hashlib.sha1()
+    for i in range(1, end + 1):
+        h.update((idx_dir / f"i_{i:04d}.png").read_bytes())
+    index_root = h.hexdigest()
+    manifest = {
+        **_map_params(data, plan, kind, conservative, stats),
+        "frames": end,
+        "index_root": index_root,
+        "source": str(project.working_source),
+        "source_sha1": _sha1(Path(project.working_source)),
+        "preset_sha1": _sha1(PRESET_BLEND),
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "map_key": key,
+    }
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    project.spatial = {"key": key, "dir": str(root), "manifest": str(manifest_path),
+                       "index_root": index_root, "frames": end, "kind": kind,
+                       "conservative": conservative, "target": stats["target"]}
+    project.save()
+    return manifest
+
+
+def validate_manifest(path: str | Path) -> dict:
+    p = Path(path)
+    if not p.exists():
+        raise RuntimeError("Manifest mappe assente.")
+    data = json.loads(p.read_text(encoding="utf-8"))
+    if data.get("renderer_version") != RENDERER_VERSION:
+        raise RuntimeError("Versione renderer mappe non coerente.")
+    return data

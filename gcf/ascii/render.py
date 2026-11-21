@@ -7,7 +7,8 @@ import subprocess
 import time
 from pathlib import Path
 
-from gcf.ascii import media, preset, tone
+from gcf.ascii import media, preset, spatial, tone
+from gcf.ascii.preset import PRESET_BLEND
 from gcf.config import ROOT, blender_bin
 
 
@@ -55,42 +56,115 @@ def _next_frame(folder: Path, total: int) -> int:
     return frame
 
 
+def _file_sha1(path: str | Path) -> str:
+    h = hashlib.sha1()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def _mode(project) -> str:
+    mode = str(getattr(project, "ascii_mode", "legacy") or "legacy")
+    if mode not in spatial.ASCII_MODES:
+        raise RuntimeError(f"Modalità ASCII non valida: {mode}")
+    if mode == "auto":
+        raise RuntimeError("Modalità Auto non approvata: manca il gate del selettore.")
+    return mode
+
+
+def _variant(project) -> str:
+    variant = str(getattr(project, "spatial_variant", "d") or "d")
+    if variant not in spatial.SPATIAL_VARIANTS:
+        raise RuntimeError(f"Variante spaziale non valida: {variant}")
+    return variant
+
+
 def _signature(project, params: dict, plan: dict) -> str:
+    mode = _mode(project)
+    variant = _variant(project)
+    maps = getattr(project, "spatial", {}) or {}
     payload = {
-        "source": project.source,
+        "source_path": project.source,
+        "source_sha1": _file_sha1(project.working_source),
+        "preset_sha1": _file_sha1(PRESET_BLEND),
         "format": project.format,
         "start": project.interval_start,
         "duration": project.interval_duration,
         "params": {k: v for k, v in project.params.items() if k != "youtube_mbps"},
-        "grid": params.get("Grid X"),
-        "plan": plan.get("keyframes"),
+        "grid": [params.get("Grid X"), params.get("Grid Y")],
+        "plan": {
+            "total_frames": plan.get("total_frames"),
+            "frame_scale": plan.get("frame_scale"),
+            "frame_offset": plan.get("frame_offset"),
+            "cuts": plan.get("cuts"),
+            "keyframes": plan.get("keyframes"),
+        },
+        "mode": mode,
+        "variant": variant,
+        "map_key": maps.get("key"),
+        "map_root": maps.get("index_root"),
+        "renderer_version": spatial.RENDERER_VERSION if mode == "spatial" else "legacy-1",
     }
     return hashlib.sha1(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
 
 
 def prepare(project, progress=None) -> dict:
     project.ensure_dirs()
+    started = time.time()
+    ascii_mode = _mode(project)
     _progress(progress, 0, 0, 0, "Preparazione sorgente")
     media.prepare_working(project)
     _progress(progress, 0, 0, 0, "Analisi frame")
     media.extract_analysis(project)
     data = preset.resolve(project)
+    grid = (data["grid"]["cols"], data["grid"]["rows"])
+    analysis_grid = grid if ascii_mode == "spatial" else (tone.COLS, tone.ROWS)
     plan = tone.build_plan(project, project.working_info["fps"], data["shadow"], data["white"],
                            auto=bool(project.params.get("auto_correction", False)),
-                           overrides=project.params.get("correction_overrides"))
+                           overrides=project.params.get("correction_overrides"),
+                           analysis_grid=analysis_grid, ramp=data["ramp"])
     project.plan_path = str(project.path / "temp" / "plan.json")
+    project.grid = {"cols": data["grid"]["cols"], "rows": data["grid"]["rows"],
+                    "glyph": data["grid"]["glyph"], "resolution": list(data["resolution"])}
+    project.overrides = project.params.get("correction_overrides") or {}
+    project.ascii_mode = ascii_mode
+    project.renderer_version = spatial.RENDERER_VERSION if ascii_mode == "spatial" else "legacy-1"
+    project.timings["prepare"] = round(time.time() - started, 3)
     project.save()
-    return {"params": data, "plan": plan}
+    return {"params": data, "plan": plan, "mode": ascii_mode, "variant": _variant(project)}
 
 
 def _job_payload(project, data: dict, plan: dict, mode: str, total: int,
                  frames_dir: Path, verification: Path, preview_frames: int = 0,
-                 still_frame: int = 1, still_path: str = "", start_frame: int = 1) -> dict:
+                 still_frame: int = 1, still_path: str = "", start_frame: int = 1,
+                 index_required: int | None = None) -> dict:
     by_name = {k: v for k, v in data["sockets"].items()
                if k not in ("Source Frame Scale", "Source Frame Offset")}
     expected = preset.expected(project, plan)
+    ascii_mode = _mode(project)
+    variant = _variant(project)
+    maps = getattr(project, "spatial", {}) or {}
+    spatial_info = {}
+    if ascii_mode == "spatial":
+        root = Path(maps["dir"])
+        spatial_info = {
+            "dir": str(root),
+            "index_dir": str(root / "idx"),
+            "manifest": maps.get("manifest", ""),
+            "map_key": maps.get("key", ""),
+            "index_root": maps.get("index_root", ""),
+            "index_count": int(maps.get("frames", 0)),
+            "kind": maps.get("kind", "spatial"),
+            "conservative": bool(maps.get("conservative", False)),
+            "target": maps.get("target", 0.0),
+        }
     return {
         "mode": mode,
+        "ascii_mode": ascii_mode,
+        "spatial_variant": variant,
+        "renderer_version": project.renderer_version,
+        "spatial": spatial_info,
         "source": project.working_source,
         "plane": [data["grid"]["plane_x"], data["grid"]["plane_y"]],
         "resolution": list(data["resolution"]),
@@ -106,11 +180,12 @@ def _job_payload(project, data: dict, plan: dict, mode: str, total: int,
         "still_frame": still_frame,
         "still_path": still_path,
         "start_frame": start_frame,
+        "index_required": int(index_required if index_required is not None else total),
     }
 
 
 def _run_blender(project, payload: dict, total: int, frames_dir: Path,
-                 progress=None, cancel=None, stage="Rendering") -> None:
+                 progress=None, cancel=None, stage="Rendering") -> float:
     job_path = project.path / "temp" / f"job_{payload['mode']}.json"
     job_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     preset_copy = project.path / "temp" / "preset_work.blend"
@@ -144,16 +219,52 @@ def _run_blender(project, payload: dict, total: int, frames_dir: Path,
         raise RuntimeError(f"Blender ha fallito (codice {proc.returncode}).\n{tail}")
     done = _count_frames(frames_dir)
     _progress(progress, done, total, time.time() - started, stage)
+    return time.time() - started
 
 
-def _read_verification(project, path: Path) -> dict:
+def _read_verification(project, path: Path, payload: dict | None = None) -> dict:
     if not path.exists():
         raise RuntimeError("Verifica parametri Blender assente.")
     data = json.loads(path.read_text(encoding="utf-8"))
     project.verification = data
     if data.get("frame_range", [1, 1])[0] != 1:
         raise RuntimeError("Frame range inatteso nella verifica.")
+    if payload is not None:
+        if data.get("ascii_mode") != payload.get("ascii_mode"):
+            raise RuntimeError("Modalità ASCII non coerente nella verifica.")
+        if payload.get("ascii_mode") == "spatial":
+            maps = payload.get("spatial", {})
+            if data.get("map_key") != maps.get("map_key"):
+                raise RuntimeError("Chiave mappe non coerente nella verifica.")
+            if data.get("index_count", 0) < payload.get("index_required", payload.get("total_frames", 0)):
+                raise RuntimeError("Sequenza indici incompleta nella verifica.")
+            if data.get("index_colorspace") != "Non-Color":
+                raise RuntimeError("Colore degli indici non Non-Color.")
     return data
+
+
+def _ensure_maps(project, data: dict, plan: dict, end: int,
+                 progress=None, cancel=None) -> dict | None:
+    if _mode(project) == "legacy":
+        return None
+    variant = _variant(project)
+    kind = {"d": "spatial", "conservative": "conservative", "global": "global"}[variant]
+    started = time.time()
+    try:
+        manifest = spatial.ensure_maps(
+            project, data, plan, end=end, kind=kind,
+            conservative=variant == "conservative", progress=progress, cancel=cancel)
+    except RuntimeError as exc:
+        if cancel is not None and cancel.is_set():
+            raise AsciiCanceled("Generazione mappe interrotta.") from exc
+        raise
+    project.timings["maps"] = round(time.time() - started, 3)
+    project.save()
+    return manifest
+
+
+def _maps_path(project) -> Path:
+    return Path(project.spatial["dir"])
 
 
 def preview(project, progress=None, cancel=None) -> Path:
@@ -161,15 +272,20 @@ def preview(project, progress=None, cancel=None) -> Path:
     data, plan = prepared["params"], prepared["plan"]
     total = plan["total_frames"]
     preview_frames = max(1, min(120, int(round(min(4.0, project.working_info["duration"]) * 30))))
+    _ensure_maps(project, data, plan, preview_frames, progress, cancel)
     frames = project.preview_frames_dir
     if frames.exists():
         shutil.rmtree(frames)
     frames.mkdir(parents=True, exist_ok=True)
     verification = project.path / "temp" / "verification_preview.json"
     payload = _job_payload(project, data, plan, "preview", total, frames, verification,
-                           preview_frames=preview_frames)
-    _run_blender(project, payload, preview_frames, frames, progress, cancel, "Anteprima")
-    _read_verification(project, verification)
+                           preview_frames=preview_frames, index_required=preview_frames)
+    render_seconds = _run_blender(project, payload, preview_frames, frames, progress, cancel, "Anteprima")
+    project.timings["render_preview"] = round(render_seconds, 3)
+    _read_verification(project, verification, payload)
+    if _mode(project) == "spatial":
+        spatial.validate_renders(frames, _maps_path(project), preview_frames,
+                                 data["grid"]["cols"], data["grid"]["rows"])
     out = project.path / "preview" / "preview.mp4"
     _progress(progress, preview_frames, preview_frames, 0, "Codifica anteprima")
     media.encode_frames(project, frames, out, kind="preview")
@@ -184,12 +300,16 @@ def still(project, at: float, progress=None, cancel=None) -> Path:
     data, plan = prepared["params"], prepared["plan"]
     total = plan["total_frames"]
     frame = max(1, min(total, int(round(float(at) * 30)) + 1))
+    _ensure_maps(project, data, plan, frame, progress, cancel)
     out = project.path / "preview" / f"still_{frame:04d}.png"
     verification = project.path / "temp" / "verification_still.json"
     payload = _job_payload(project, data, plan, "still", total, project.path / "preview",
-                           verification, still_frame=frame, still_path=str(out))
+                           verification, still_frame=frame, still_path=str(out),
+                           index_required=frame)
     _run_blender(project, payload, 1, project.path / "preview", progress, cancel, "Frame singolo")
-    _read_verification(project, verification)
+    _read_verification(project, verification, payload)
+    if not out.exists():
+        raise RuntimeError("Frame singolo non prodotto.")
     project.preview = str(out)
     project.status = "still"
     project.save()
@@ -199,26 +319,35 @@ def still(project, at: float, progress=None, cancel=None) -> Path:
 def render(project, progress=None, cancel=None) -> dict:
     prepared = prepare(project, progress)
     data, plan = prepared["params"], prepared["plan"]
+    total = plan["total_frames"]
+    _ensure_maps(project, data, plan, total, progress, cancel)
     signature = _signature(project, data["sockets"], plan)
     frames = project.frames_dir
     if project.render_key and project.render_key != signature and frames.exists():
         shutil.rmtree(frames)
     project.render_key = signature
     frames.mkdir(parents=True, exist_ok=True)
-    total = plan["total_frames"]
     start = _next_frame(frames, total)
     verification = project.path / "temp" / "verification_full.json"
     payload = _job_payload(project, data, plan, "full", total, frames, verification,
-                           start_frame=start)
+                           start_frame=start, index_required=total)
     if start <= total:
-        _run_blender(project, payload, total, frames, progress, cancel, "Rendering completo")
-    _read_verification(project, verification)
+        render_seconds = _run_blender(project, payload, total, frames, progress, cancel,
+                                      "Rendering completo")
+        project.timings["render"] = round(render_seconds, 3)
+    _read_verification(project, verification, payload)
     if _count_frames(frames) < total:
         raise RuntimeError(f"Frame mancanti: {_count_frames(frames)}/{total}.")
+    if _mode(project) == "spatial":
+        step = 1 if total <= 900 else max(1, total // 450)
+        spatial.validate_renders(frames, _maps_path(project), total,
+                                 data["grid"]["cols"], data["grid"]["rows"], sample_step=step)
     _progress(progress, total, total, 0, "Codifica master")
+    started = time.time()
     master = media.encode_frames(project, frames, project.master_path, kind="master")
     _progress(progress, total, total, 0, "Codifica YouTube")
     youtube = media.encode_frames(project, frames, project.youtube_path, kind="youtube")
+    project.timings["encode"] = round(time.time() - started, 3)
     master_info = media.probe(master)
     youtube_info = media.probe(youtube)
     expected_duration = project.working_info["duration"]
