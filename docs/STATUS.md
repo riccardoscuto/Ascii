@@ -500,3 +500,12 @@ Verificare copertina, numero, reveal e transizione su `_discovery/graphics_test_
 - Villaggio: Spatial piu denso e leggibile. Scuro: Spatial respinto (quasi nero); M3/M4 Legacy resta la soluzione.
 - Auto non implementata: progetto in `docs/ASCII_AUTO_SELECTOR.md`; nessuna GUI modificata.
 - Dettagli e metriche: `docs/ASCII_MILESTONE6.md`.
+
+## Milestone 7 — Adaptive Spatial + Auto offline (2026-11-23)
+
+- Aggiunte varianti Spatial adaptive e adaptive-conservative con target per shot, curva anti-flicker e flash esclusi dal piano.
+- Prototipo Auto offline in `gcf/ascii/selector.py`: Legacy 96, Spatial adaptive 144, Conservative adaptive 144 su due frame per shot.
+- Composito 14 s (NieR, villaggio, foresta/fade, scuro): Auto e manuale coincidono 5/5; nessuna scelta Auto peggiore.
+- Stop/ripresa reale a 57/90 frame: ripresa completa, pixel identici al rendering continuo. Cache verificata anche contro mappe corrotte; piani Legacy riusati.
+- Auto non collegato alla GUI e non default; M3/M4 Legacy resta la soluzione scura.
+- Dettagli: `docs/ASCII_MILESTONE7.md`, `docs/ASCII_AUTO_SELECTOR.md`.

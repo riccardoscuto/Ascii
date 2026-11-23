@@ -109,6 +109,21 @@ def _signature(project, params: dict, plan: dict) -> str:
     return hashlib.sha1(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
 
 
+def _plan_context(project, data: dict, analysis_grid: tuple[int, int]) -> str:
+    payload = {
+        "source_sha1": _file_sha1(project.working_source),
+        "preset_sha1": _file_sha1(PRESET_BLEND),
+        "params": {k: v for k, v in project.params.items() if k != "youtube_mbps"},
+        "grid": [data["grid"]["cols"], data["grid"]["rows"]],
+        "analysis_grid": [int(analysis_grid[0]), int(analysis_grid[1])],
+        "mode": _mode(project),
+        "auto": bool(project.params.get("auto_correction", False)),
+        "overrides": project.params.get("correction_overrides") or {},
+        "plan_version": "tone-linear-1",
+    }
+    return hashlib.sha1(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+
+
 def prepare(project, progress=None) -> dict:
     project.ensure_dirs()
     started = time.time()
@@ -120,11 +135,28 @@ def prepare(project, progress=None) -> dict:
     data = preset.resolve(project)
     grid = (data["grid"]["cols"], data["grid"]["rows"])
     analysis_grid = grid if ascii_mode == "spatial" else (tone.COLS, tone.ROWS)
-    plan = tone.build_plan(project, project.working_info["fps"], data["shadow"], data["white"],
-                           auto=bool(project.params.get("auto_correction", False)),
-                           overrides=project.params.get("correction_overrides"),
-                           analysis_grid=analysis_grid, ramp=data["ramp"])
-    project.plan_path = str(project.path / "temp" / "plan.json")
+    context = _plan_context(project, data, analysis_grid)
+    plan = None
+    if project.plan_path and Path(project.plan_path).exists():
+        try:
+            candidate = json.loads(Path(project.plan_path).read_text(encoding="utf-8"))
+            same_context = project.plan_context == context if project.plan_context else True
+            total = int(round(project.working_info["duration"] * 30))
+            same_shape = (int(candidate.get("total_frames", -1)) == total
+                          and abs(float(candidate.get("duration", -1)) -
+                                  project.working_info["duration"]) < 0.05)
+            if same_context and same_shape:
+                plan = candidate
+        except Exception:
+            plan = None
+    if plan is None:
+        plan = tone.build_plan(project, project.working_info["fps"], data["shadow"], data["white"],
+                               auto=bool(project.params.get("auto_correction", False)),
+                               overrides=project.params.get("correction_overrides"),
+                               analysis_grid=analysis_grid, ramp=data["ramp"])
+    else:
+        project.plan_path = str(project.plan_path)
+    project.plan_context = context
     project.grid = {"cols": data["grid"]["cols"], "rows": data["grid"]["rows"],
                     "glyph": data["grid"]["glyph"], "resolution": list(data["resolution"])}
     project.overrides = project.params.get("correction_overrides") or {}
@@ -248,12 +280,16 @@ def _ensure_maps(project, data: dict, plan: dict, end: int,
     if _mode(project) == "legacy":
         return None
     variant = _variant(project)
-    kind = {"d": "spatial", "conservative": "conservative", "global": "global"}[variant]
+    kind = {"d": "spatial", "conservative": "conservative",
+            "adaptive": "spatial", "adaptive-conservative": "conservative",
+            "global": "global"}[variant]
     started = time.time()
     try:
         manifest = spatial.ensure_maps(
             project, data, plan, end=end, kind=kind,
-            conservative=variant == "conservative", progress=progress, cancel=cancel)
+            conservative=variant in ("conservative", "adaptive-conservative"),
+            adaptive=variant in ("adaptive", "adaptive-conservative"),
+            progress=progress, cancel=cancel)
     except RuntimeError as exc:
         if cancel is not None and cancel.is_set():
             raise AsciiCanceled("Generazione mappe interrotta.") from exc

@@ -41,7 +41,11 @@ The backend exposes Legacy and Spatial without changing the GUI:
 python -m gcf ascii preview --project projects/<id> --mode spatial --variant d --density 81
 python -m gcf ascii still   --project projects/<id> --mode spatial --variant conservative --at 4
 python -m gcf ascii render  --project projects/<id> --mode spatial --variant d --density 81
-```
+python -m gcf ascii auto    --project projects/<id>
+`
+
+The uto command is an offline selector prototype; it is not a GUI mode and does not
+become a default.``
 
 `legacy` is the approved 96×54 v2 path. `spatial` uses the external 144×81 maps;
 `conservative` is the experimental negative-space variant. `auto` is deliberately rejected

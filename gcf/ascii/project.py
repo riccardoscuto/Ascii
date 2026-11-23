@@ -40,6 +40,8 @@ class AsciiProject:
     working_info: dict = field(default_factory=dict)
     working_source: str = ""
     plan_path: str = ""
+    selection_plan: str = ""
+    plan_context: str = ""
     verification: dict = field(default_factory=dict)
     preview: str = ""
     outputs: dict = field(default_factory=dict)

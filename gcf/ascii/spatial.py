@@ -21,7 +21,7 @@ SPATIAL = {"radius": 4, "sigma_s": 2.5, "sigma_r": 0.08,
 D_CONSERVATIVE = {"radius": 2, "empty_below": 0.35, "reduce_below": 0.65,
                   "luma_lo": 1.8, "luma_hi": 2.8}
 ASCII_MODES = ("legacy", "spatial", "auto")
-SPATIAL_VARIANTS = ("d", "conservative", "global")
+SPATIAL_VARIANTS = ("d", "conservative", "global", "adaptive", "adaptive-conservative")
 
 
 def _sha1(path: Path) -> str:
@@ -139,6 +139,145 @@ def spatial_index(cells: np.ndarray, base: np.ndarray, target: float,
     return out, tone
 
 
+def _flash_frames(means: list[float]) -> set[int]:
+    flash = set()
+    for i, mean in enumerate(means):
+        if i == 0:
+            continue
+        window = [means[j] for j in range(max(0, i - 4), min(len(means), i + 5)) if j != i]
+        after = [means[j] for j in range(i + 1, min(len(means), i + 4))]
+        previous = means[i - 1]
+        if (window and after and mean > previous + 0.12
+                and abs(after[0] - previous) < 0.12
+                and max(after) < float(np.median(window)) + 0.08):
+            flash.add(i)
+    return flash
+
+
+def _shot_bounds(cuts: list[float], total: int) -> list[tuple[int, int]]:
+    points = [1]
+    for cut in sorted(float(c) for c in cuts):
+        frame = max(1, min(total, int(round(cut * 30)) + 1))
+        if frame > points[-1] + 1:
+            points.append(frame)
+    if points[-1] <= total:
+        points.append(total + 1)
+    bounds = [(a, b - 1) for a, b in zip(points, points[1:])]
+    merged = []
+    for start, end in bounds:
+        if merged and end - start + 1 < 24:
+            merged[-1] = (merged[-1][0], end)
+        else:
+            merged.append((start, end))
+    if len(merged) > 1 and merged[0][1] - merged[0][0] + 1 < 24:
+        merged[1] = (merged[0][0], merged[1][1])
+        merged.pop(0)
+    return merged
+
+
+def adaptive_stats(project, data: dict, plan: dict, kind: str,
+                   conservative: bool) -> dict:
+    """Per-shot targets plus a slow, flash-safe intra-shot target curve."""
+    frames = sorted((project.path / "analysis").glob("f_*.png"))
+    if not frames:
+        raise RuntimeError("Spatial adattivo: nessun frame di analisi.")
+    step = max(1, len(frames) // 300)
+    frames = frames[::step]
+    total = int(plan["total_frames"])
+    times = np.array([(i * step) / 10.0 for i in range(len(frames))], dtype=np.float32)
+    medians, means = [], []
+    edge_values, std_values = [], []
+    for path in frames:
+        im = Image.open(path).convert("RGB")
+        cells, centre = luma.linear_luma_cell_samples(im, data["grid"]["cols"], data["grid"]["rows"])
+        base = bilateral(cells)
+        medians.append(float(np.median(cells)))
+        means.append(float(np.mean(np.asarray(im.convert("L"), dtype=np.float32)) / 255.0))
+        if kind == "conservative":
+            edge_values.append((np.abs(cells - base) / np.maximum(base, 0.002)).ravel())
+            std_values.append(luma.local_std(cells, D_CONSERVATIVE["radius"]).ravel())
+    medians = np.asarray(medians, dtype=np.float32)
+    flashes = _flash_frames(list(means))
+    bounds = _shot_bounds(plan.get("cuts", []), total)
+    curve = np.zeros(total, dtype=np.float32)
+    shots = []
+    for start, end in bounds:
+        start_t, end_t = (start - 1) / 30.0, (end - 1) / 30.0 + 1 / 30.0
+        idx = [i for i, t in enumerate(times) if start_t <= t < end_t]
+        if not idx:
+            idx = [int(np.clip(np.searchsorted(times, start_t), 0, len(times) - 1))]
+        shot_means = np.asarray(means, dtype=np.float32)[idx] if idx else np.asarray(means, dtype=np.float32)
+        shot_med = float(np.median(shot_means)) if len(shot_means) else 0.0
+        j = 0
+        while j < len(idx):
+            if means[idx[j]] > shot_med + 0.20:
+                k = j + 1
+                while k < len(idx) and means[idx[k]] > shot_med + 0.20:
+                    k += 1
+                if 1 <= k - j <= 5 and (k - j) < len(idx):
+                    flashes.update(idx[j:k])
+                j = k
+            else:
+                j += 1
+        clean = [i for i in idx if i not in flashes]
+        use = clean or idx
+        target = float(np.median(medians[use]))
+        raw = medians[idx].astype(np.float32).copy()
+        # A brief flash is an outlier, not a new exposure target.
+        for j, i in enumerate(idx):
+            if i in flashes:
+                raw[j] = np.nan
+        good = np.flatnonzero(~np.isnan(raw))
+        if len(good) >= 2:
+            raw = np.interp(np.arange(len(raw)), good, raw[good]).astype(np.float32)
+        elif len(good) == 1:
+            raw[:] = raw[good[0]]
+        else:
+            raw[:] = target
+        raw = np.clip(raw, target * 0.65, target * 1.45)
+        if len(raw) >= 3:
+            raw = np.array([np.median(raw[max(0, j - 1):min(len(raw), j + 2)])
+                            for j in range(len(raw))], dtype=np.float32)
+        smoothed = np.zeros_like(raw)
+        value = raw[0]
+        max_step = max(1e-5, target * 0.04)
+        for j, item in enumerate(raw):
+            value += 0.30 * (float(item) - value)
+            value = float(np.clip(value, value - max_step, value + max_step))
+            smoothed[j] = value
+        shot_times = times[idx]
+        for frame in range(start, end + 1):
+            t = (frame - 1) / 30.0
+            curve[frame - 1] = float(np.interp(t, shot_times, smoothed,
+                                               left=smoothed[0], right=smoothed[-1]))
+        shot = {"start": start, "end": end, "target": round(target, 5),
+                "flash_frames": sorted(int(round(times[i] * 30)) + 1 for i in idx if i in flashes)}
+        if kind == "conservative":
+            shot_edges = np.concatenate([edge_values[i] for i in use])
+            shot_stds = np.concatenate([std_values[i] for i in use])
+            shot.update({
+                "edge_p50": float(np.percentile(shot_edges, 50)),
+                "edge_p85": float(np.percentile(shot_edges, 85)),
+                "std_p50": float(np.percentile(shot_stds, 50)),
+                "std_p85": float(np.percentile(shot_stds, 85)),
+            })
+        shots.append(shot)
+    return {
+        "adaptive": True,
+        "target_curve": [round(float(v), 6) for v in curve],
+        "shots": shots,
+        "flashes": sorted(int(round(times[i] * 30)) + 1 for i in flashes),
+        "analysis_frames": len(frames),
+    }
+
+
+def shot_stats_at(stats: dict, frame: int) -> dict:
+    for shot in stats.get("shots", []):
+        if shot["start"] <= frame <= shot["end"]:
+            return shot
+    return stats.get("shots", [{}])[0] if stats.get("shots") else {}
+
+
 def analysis_stats(project, data: dict, plan: dict) -> dict:
     """Target and local-structure percentiles from the 10 fps analysis frames."""
     frames = sorted((project.path / "analysis").glob("f_*.png"))
@@ -171,7 +310,7 @@ def analysis_stats(project, data: dict, plan: dict) -> dict:
 
 
 def _map_params(data: dict, plan: dict, kind: str, conservative: bool, stats: dict) -> dict:
-    return {
+    out = {
         "renderer_version": RENDERER_VERSION,
         "grid": [data["grid"]["cols"], data["grid"]["rows"]],
         "ramp": data["ramp"],
@@ -179,13 +318,16 @@ def _map_params(data: dict, plan: dict, kind: str, conservative: bool, stats: di
         "conservative": bool(conservative),
         "spatial": SPATIAL,
         "conservative_params": D_CONSERVATIVE,
-        "target": stats["target"],
+        "target": stats.get("target", 0.0),
         "stats": stats,
         "tone": {k: data[k] for k in ("gamma", "shadow", "white", "contrast_low",
                                        "contrast_high", "local_contrast")},
         "plan_keyframes": plan.get("keyframes", []),
         "plan_cuts": plan.get("cuts", []),
     }
+    if stats.get("adaptive"):
+        out["adaptive"] = True
+    return out
 
 
 def map_key(project, data: dict, plan: dict, kind: str, conservative: bool,
@@ -199,10 +341,12 @@ def map_key(project, data: dict, plan: dict, kind: str, conservative: bool,
 
 
 def _manifest_valid(folder: Path, manifest: dict, end: int, data: dict,
-                    kind: str, conservative: bool) -> bool:
+                    kind: str, conservative: bool, adaptive: bool = False) -> bool:
     if not manifest or manifest.get("renderer_version") != RENDERER_VERSION:
         return False
     if manifest.get("kind") != kind or bool(manifest.get("conservative")) != bool(conservative):
+        return False
+    if bool(manifest.get("adaptive")) != bool(adaptive):
         return False
     if manifest.get("grid") != [data["grid"]["cols"], data["grid"]["rows"]]:
         return False
@@ -211,6 +355,13 @@ def _manifest_valid(folder: Path, manifest: dict, end: int, data: dict,
     if int(manifest.get("frames", 0)) < end:
         return False
     return len(list((folder / "idx").glob("i_*.png"))) >= end
+
+
+def _index_root(folder: Path, end: int) -> str:
+    h = hashlib.sha1()
+    for i in range(1, end + 1):
+        h.update((folder / "idx" / f"i_{i:04d}.png").read_bytes())
+    return h.hexdigest()
 
 
 def validate_index_maps(folder: Path, end: int, cols: int, rows: int,
@@ -228,7 +379,7 @@ def validate_index_maps(folder: Path, end: int, cols: int, rows: int,
     extra = sorted(v for v in levels if v not in expected)
     if extra:
         raise RuntimeError(f"Indici fuori codifica 0–255: {extra[:12]}")
-    return {"levels": sorted(levels), "frames": end}
+    return {"levels": sorted(levels), "frames": end, "index_root": _index_root(folder, end)}
 
 
 def validate_renders(frames_dir: Path, maps_dir: Path, end: int, cols: int, rows: int,
@@ -273,16 +424,19 @@ def validate_renders(frames_dir: Path, maps_dir: Path, end: int, cols: int, rows
 
 def ensure_maps(project, data: dict, plan: dict, end: int, kind: str = "spatial",
                 conservative: bool = False, progress=None, cancel=None,
-                start: int = 1) -> dict:
+                start: int = 1, adaptive: bool = False) -> dict:
     """Generate or reuse deterministic tone/index maps for render frames."""
     if kind not in ("global", "spatial", "conservative"):
         raise ValueError(f"Tipo mappa non valido: {kind}")
     if end < 1:
         raise ValueError("Intervallo mappe vuoto.")
-    stats = analysis_stats(project, data, plan) if kind != "global" else {
-        "target": 0.0, "p50": 0.0, "edge_p50": 0.0, "edge_p85": 0.0,
-        "std_p50": 0.0, "std_p85": 0.0, "analysis_frames": 0,
-    }
+    if kind == "global":
+        stats = {"target": 0.0, "p50": 0.0, "edge_p50": 0.0, "edge_p85": 0.0,
+                 "std_p50": 0.0, "std_p85": 0.0, "analysis_frames": 0}
+    elif adaptive:
+        stats = adaptive_stats(project, data, plan, kind, conservative)
+    else:
+        stats = analysis_stats(project, data, plan)
     key = map_key(project, data, plan, kind, conservative, stats)
     root = project.path / "temp" / "spatial" / key
     idx_dir = root / "idx"
@@ -291,16 +445,19 @@ def ensure_maps(project, data: dict, plan: dict, end: int, kind: str = "spatial"
     tone_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = root / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {}
-    if _manifest_valid(root, manifest, end, data, kind, conservative):
+    if _manifest_valid(root, manifest, end, data, kind, conservative, adaptive):
         try:
-            validate_index_maps(root, end, data["grid"]["cols"], data["grid"]["rows"], data["ramp"])
+            checked = validate_index_maps(root, end, data["grid"]["cols"], data["grid"]["rows"], data["ramp"])
+            if checked["index_root"] != manifest.get("index_root"):
+                raise RuntimeError("Contenuto mappe diverso dall'hash registrato.")
             project.spatial = {"key": key, "dir": str(root), "manifest": str(manifest_path),
                                "index_root": manifest["index_root"], "frames": end,
-                               "kind": kind, "conservative": conservative, "target": stats["target"]}
+                               "kind": kind, "conservative": conservative,
+                               "adaptive": adaptive, "target": stats.get("target", 0.0)}
             project.save()
             return manifest
-        except RuntimeError:
-            # Corrupt/legacy 0–8 maps must never be reused.
+        except Exception:
+            # Corrupt/legacy 0-8 maps must never be reused.
             for old in list(idx_dir.glob("*.png")) + list(tone_dir.glob("*.png")):
                 old.unlink(missing_ok=True)
             manifest = {}
@@ -332,8 +489,10 @@ def ensure_maps(project, data: dict, plan: dict, end: int, kind: str = "spatial"
                     idx, tone = global_index(cells, centre, tone_at(plan, frame, data), data["ramp"])
                 else:
                     base = bilateral(cells)
-                    idx, tone = spatial_index(cells, base, stats["target"], data["ramp"],
-                                              conservative=conservative, stats=stats)
+                    target = stats["target_curve"][frame - 1] if adaptive else stats["target"]
+                    frame_stats = shot_stats_at(stats, frame) if adaptive else stats
+                    idx, tone = spatial_index(cells, base, target, data["ramp"],
+                                              conservative=conservative, stats=frame_stats)
                 encode_index(idx, data["ramp"]).save(out_idx)
                 Image.fromarray(tone, mode="L").save(out_tone)
             done += 1
@@ -350,10 +509,7 @@ def ensure_maps(project, data: dict, plan: dict, end: int, kind: str = "spatial"
         except Exception:
             pass
     validate_index_maps(root, end, cols, rows, data["ramp"])
-    h = hashlib.sha1()
-    for i in range(1, end + 1):
-        h.update((idx_dir / f"i_{i:04d}.png").read_bytes())
-    index_root = h.hexdigest()
+    index_root = _index_root(root, end)
     manifest = {
         **_map_params(data, plan, kind, conservative, stats),
         "frames": end,
@@ -367,7 +523,8 @@ def ensure_maps(project, data: dict, plan: dict, end: int, kind: str = "spatial"
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     project.spatial = {"key": key, "dir": str(root), "manifest": str(manifest_path),
                        "index_root": index_root, "frames": end, "kind": kind,
-                       "conservative": conservative, "target": stats["target"]}
+                       "conservative": conservative, "adaptive": adaptive,
+                       "target": stats.get("target", 0.0)}
     project.save()
     return manifest
 

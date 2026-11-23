@@ -23,6 +23,7 @@ from gcf.config import ROOT, ffmpeg_bin, ffprobe_bin, project_dir
 from gcf.ascii.project import AsciiProject
 from gcf.ascii import preset as ascii_preset
 from gcf.ascii import render as ascii_render
+from gcf.ascii import selector as ascii_selector
 from gcf.guess.cover import build_cover
 from gcf.guess.round import InsufficientMaterial
 from gcf.guess.short import build_game_round, build_short
@@ -290,6 +291,18 @@ def cmd_ascii_still(args) -> None:
     print("still:", out)
 
 
+def cmd_ascii_auto(args) -> None:
+    project = AsciiProject.load(Path(args.project))
+    evidence = Path(args.evidence) if args.evidence else project.path / "selector_evidence"
+    plan = ascii_selector.select(project, evidence, _ascii_progress)
+    choices = {row["shot"]: row["selected"] for row in plan["shots"]}
+    out = Path(args.out) if args.out else project.output_dir / "auto.mp4"
+    ascii_selector.render_plan(plan, project, choices, out, _ascii_progress)
+    print("selection:", project.selection_plan)
+    print("auto video:", out)
+    print("choices:", choices)
+
+
 def cmd_ascii_render(args) -> None:
     project = _ascii_project(args)
     out = ascii_render.render(project, _ascii_progress)
@@ -407,7 +420,7 @@ def build_parser() -> argparse.ArgumentParser:
     def ascii_common(sp):
         sp.add_argument("--project", required=True)
         sp.add_argument("--mode", choices=["legacy", "spatial", "auto"], default="legacy")
-        sp.add_argument("--variant", choices=["d", "conservative", "global"], default="d")
+        sp.add_argument("--variant", choices=["d", "conservative", "adaptive", "adaptive-conservative", "global"], default="d")
         sp.add_argument("--density", type=int, default=None,
                         help="griglia: 81 = 144x81 orizzontale")
 
@@ -423,6 +436,12 @@ def build_parser() -> argparse.ArgumentParser:
     ar = asc_sub.add_parser("render", help="rendering completo")
     ascii_common(ar)
     ar.set_defaults(func=cmd_ascii_render)
+
+    aa = asc_sub.add_parser("auto", help="prototipo offline del selettore Auto")
+    aa.add_argument("--project", required=True)
+    aa.add_argument("--evidence", default=None)
+    aa.add_argument("--out", default=None)
+    aa.set_defaults(func=cmd_ascii_auto)
 
     return p
 

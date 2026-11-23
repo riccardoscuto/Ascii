@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import numpy as np
 from PIL import Image
 
-from gcf.ascii import correction, luma, preset, spatial
+from gcf.ascii import correction, luma, preset, selector, spatial
 from gcf.ascii import render as render_mod
 
 
@@ -60,6 +60,35 @@ class SpatialUnitTests(unittest.TestCase):
             stats = correction._frame_stats(path, 144, 81)
             self.assertEqual(len(stats["cells"]), 144 * 81)
             self.assertTrue(0.0 <= stats["p50"] <= stats["p95"] <= 1.0)
+
+    def test_adaptive_curve_ignores_brief_flash(self):
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "analysis").mkdir()
+            for i in range(20):
+                value = 20 if i != 5 else 255
+                Image.new("RGB", (320, 180), (value, value, value)).save(
+                    root / "analysis" / f"f_{i + 1:04d}.png")
+            project = SimpleNamespace(path=root, format="horizontal",
+                                      params={"density": 81, "gamma": 0.82,
+                                              "shadow": 0.31, "color_mode": 1.0})
+            data = preset.resolve(project)
+            plan = {"total_frames": 60, "cuts": [], "keyframes": []}
+            stats = spatial.adaptive_stats(project, data, plan, "conservative", True)
+            self.assertEqual(len(stats["target_curve"]), 60)
+            self.assertTrue(stats["flashes"])
+            self.assertLess(max(stats["target_curve"]), 0.25)
+            self.assertLess(stats["shots"][0]["target"], 0.1)
+
+    def test_selector_score_prefers_negative_space_and_rejects_blank(self):
+        base = {"structure": 0.8, "shadow": 0.8, "density": 0.9,
+                "empty": 0.3, "saturation": 1.0, "color": 0.8,
+                "render_mean": 20.0, "render_max": 200}
+        good = selector._score(base, 0.02)
+        dense = selector._score({**base, "empty": 0.0, "density": 0.45}, 0.02)
+        self.assertGreater(good, dense)
+        self.assertEqual(selector._score({**base, "render_mean": 0.1}, 0.02), -1.0)
 
     def test_auto_mode_is_rejected(self):
         project = SimpleNamespace(ascii_mode="auto")
