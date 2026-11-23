@@ -90,6 +90,10 @@ class SpatialUnitTests(unittest.TestCase):
         self.assertGreater(good, dense)
         self.assertEqual(selector._score({**base, "render_mean": 0.1}, 0.02), -1.0)
 
+    def test_selector_vertical_resolution(self):
+        self.assertEqual(selector._resolution("horizontal"), (1920, 1080))
+        self.assertEqual(selector._resolution("vertical"), (1080, 1920))
+
     def test_auto_mode_is_rejected(self):
         project = SimpleNamespace(ascii_mode="auto")
         with self.assertRaises(RuntimeError):

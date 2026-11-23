@@ -170,7 +170,7 @@ def prepare(project, progress=None) -> dict:
 def _job_payload(project, data: dict, plan: dict, mode: str, total: int,
                  frames_dir: Path, verification: Path, preview_frames: int = 0,
                  still_frame: int = 1, still_path: str = "", start_frame: int = 1,
-                 index_required: int | None = None) -> dict:
+                 end_frame: int | None = None, index_required: int | None = None) -> dict:
     by_name = {k: v for k, v in data["sockets"].items()
                if k not in ("Source Frame Scale", "Source Frame Offset")}
     expected = preset.expected(project, plan)
@@ -212,6 +212,7 @@ def _job_payload(project, data: dict, plan: dict, mode: str, total: int,
         "still_frame": still_frame,
         "still_path": still_path,
         "start_frame": start_frame,
+        "end_frame": int(end_frame if end_frame is not None else total),
         "index_required": int(index_required if index_required is not None else total),
     }
 
@@ -259,8 +260,9 @@ def _read_verification(project, path: Path, payload: dict | None = None) -> dict
         raise RuntimeError("Verifica parametri Blender assente.")
     data = json.loads(path.read_text(encoding="utf-8"))
     project.verification = data
-    if data.get("frame_range", [1, 1])[0] != 1:
-        raise RuntimeError("Frame range inatteso nella verifica.")
+    if payload is None or payload.get("mode") != "segment":
+        if data.get("frame_range", [1, 1])[0] != 1:
+            raise RuntimeError("Frame range inatteso nella verifica.")
     if payload is not None:
         if data.get("ascii_mode") != payload.get("ascii_mode"):
             raise RuntimeError("Modalità ASCII non coerente nella verifica.")
@@ -301,6 +303,26 @@ def _ensure_maps(project, data: dict, plan: dict, end: int,
 
 def _maps_path(project) -> Path:
     return Path(project.spatial["dir"])
+
+
+def render_window(project, start_frame: int, end_frame: int, out_dir: Path,
+                  progress=None, cancel=None) -> list[Path]:
+    """Render a short consecutive frame segment for selector sampling."""
+    prepared = prepare(project, progress)
+    data, plan = prepared["params"], prepared["plan"]
+    total = plan["total_frames"]
+    start_frame = max(1, int(start_frame))
+    end_frame = min(total, int(end_frame))
+    _ensure_maps(project, data, plan, end_frame, progress, cancel)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    verification = project.path / "temp" / f"verification_segment_{start_frame}_{end_frame}.json"
+    payload = _job_payload(project, data, plan, "segment", total, out_dir, verification,
+                           start_frame=start_frame, end_frame=end_frame,
+                           index_required=end_frame)
+    _run_blender(project, payload, end_frame - start_frame + 1, out_dir,
+                 progress, cancel, "Finestra selettore")
+    _read_verification(project, verification, payload)
+    return [out_dir / f"f_{i:04d}.png" for i in range(start_frame, end_frame + 1)]
 
 
 def preview(project, progress=None, cancel=None) -> Path:

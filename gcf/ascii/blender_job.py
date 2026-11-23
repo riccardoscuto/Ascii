@@ -181,7 +181,8 @@ def main():
         "source_frame_offset": round(getattr(ins, ids["Source Frame Offset"]).value, 6),
         "source": str(source),
         "image_datablock": image.name,
-        "frame_range": [1, total],
+        "frame_range": ([int(job.get("start_frame", 1)), int(job.get("end_frame", total))]
+                        if job["mode"] == "segment" else [1, total]),
         "keyframes": keys,
         "checks": checks,
         "scene_fps": scene.render.fps,
@@ -228,8 +229,14 @@ def main():
         scene.render.filepath = str(job["still_path"])
         bpy.ops.render.render(write_still=True)
     else:
-        end = int(job["preview_frames"]) if job["mode"] == "preview" else total
-        start = int(job.get("start_frame", 1)) if job["mode"] == "full" else 1
+        if job["mode"] == "preview":
+            start, end = 1, int(job["preview_frames"])
+        elif job["mode"] == "segment":
+            start = int(job.get("start_frame", 1))
+            end = int(job.get("end_frame", total))
+        else:
+            start = int(job.get("start_frame", 1))
+            end = total
         scene.frame_start = start
         scene.frame_end = end
         out = Path(job["frames_dir"])

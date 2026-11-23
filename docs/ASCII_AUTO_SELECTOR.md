@@ -139,6 +139,7 @@ D-Conservative hanno score -1 (quasi nero), Legacy M3 vince.
 File: `_discovery/milestone7/auto/` (`auto.mp4`, `manual.mp4`, `auto_vs_manual.mp4`,
 `selection_timeline.png`, `gate_metrics.json`).
 
-Limiti: due frame per shot, un solo composito, scoring ancora euristico; Auto non è
-approvato per la GUI né per un uso universale. Il test manuale è una scelta visiva per
-shot, non un dataset indipendente.
+Limiti: il test M7 usava due frame per shot e un solo composito. La validazione M7.1
+usa 3 finestre di 3 frame consecutivi su 25 shot; accuratezza 76%, con regressioni su
+Balatro/UI, esplosioni e montagna. Auto non è approvato per la GUI né per un uso
+universale. Dettagli in docs/ASCII_MILESTONE7_1.md.

@@ -42,14 +42,15 @@ python -m gcf ascii preview --project projects/<id> --mode spatial --variant d -
 python -m gcf ascii still   --project projects/<id> --mode spatial --variant conservative --at 4
 python -m gcf ascii render  --project projects/<id> --mode spatial --variant d --density 81
 python -m gcf ascii auto    --project projects/<id>
-`
+```
 
-The uto command is an offline selector prototype; it is not a GUI mode and does not
-become a default.``
+The `auto` command is an offline selector prototype; it is not a GUI mode and does not
+become a default.
 
-`legacy` is the approved 96×54 v2 path. `spatial` uses the external 144×81 maps;
+`legacy` is the approved 96x54 v2 path. `spatial` uses the external 144x81 maps;
 `conservative` is the experimental negative-space variant. `auto` is deliberately rejected
-until the selector gate is approved. See `docs/ASCII_MILESTONE6.md` and
+as a direct renderer mode until the selector gate is approved. See
+`docs/ASCII_MILESTONE6.md`, `docs/ASCII_MILESTONE7.md` and
 `docs/ASCII_AUTO_SELECTOR.md`.
 
 The GUI still creates Legacy projects; use the CLI for Spatial until the GUI selector is
@@ -59,5 +60,6 @@ approved and integrated.
 
 Start with `docs/STATUS.md`. The ASCII renderer notes are in `docs/ASCII_*.md`; the latest
 spatial tone-mapping validation is `docs/ASCII_SPATIAL_MOTION_VALIDATION.md`, with the
-Milestone 6 backend report in `docs/ASCII_MILESTONE6.md` and the selector design in
-`docs/ASCII_AUTO_SELECTOR.md`.
+Milestone 6 backend report in `docs/ASCII_MILESTONE6.md`, the Milestone 7 adaptive report
+in `docs/ASCII_MILESTONE7.md`, the independent M7.1 validation in
+`docs/ASCII_MILESTONE7_1.md`, and the selector design in `docs/ASCII_AUTO_SELECTOR.md`.

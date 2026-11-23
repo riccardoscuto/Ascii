@@ -298,7 +298,8 @@ def cmd_ascii_auto(args) -> None:
     choices = {row["shot"]: row["selected"] for row in plan["shots"]}
     out = Path(args.out) if args.out else project.output_dir / "auto.mp4"
     ascii_selector.render_plan(plan, project, choices, out, _ascii_progress)
-    print("selection:", project.selection_plan)
+    print("selection:", plan.get("selection_plan", ""))
+    print("selector project:", plan.get("selector_project", ""))
     print("auto video:", out)
     print("choices:", choices)
 

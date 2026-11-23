@@ -509,3 +509,11 @@ Verificare copertina, numero, reveal e transizione su `_discovery/graphics_test_
 - Stop/ripresa reale a 57/90 frame: ripresa completa, pixel identici al rendering continuo. Cache verificata anche contro mappe corrotte; piani Legacy riusati.
 - Auto non collegato alla GUI e non default; M3/M4 Legacy resta la soluzione scura.
 - Dettagli: `docs/ASCII_MILESTONE7.md`, `docs/ASCII_AUTO_SELECTOR.md`.
+
+## Milestone 7.1 — Auto validation indipendente (2026-11-23)
+
+- Valutazione su 3 finestre di 3 frame consecutivi, guardie per-frame, no-choice, verticale 9:16, audio e non mutazione.
+- Dataset 25 shot eterogenei: 19/25 scelte corrette (76%), 19/24 colori corretti, 6 regressioni visive, 1 scena non recuperabile riconosciuta.
+- Fallimenti principali: Balatro/UI, esplosione NieR, montagna, foresta fade. Auto non approvato per la GUI.
+- Transizione 3.1 s senza salti artificiali; cache corrotta, stop/ripresa reale e piani Legacy verificati.
+- Dettagli: docs/ASCII_MILESTONE7_1.md.
