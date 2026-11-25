@@ -21,7 +21,9 @@ SPATIAL = {"radius": 4, "sigma_s": 2.5, "sigma_r": 0.08,
 D_CONSERVATIVE = {"radius": 2, "empty_below": 0.35, "reduce_below": 0.65,
                   "luma_lo": 1.8, "luma_hi": 2.8}
 ASCII_MODES = ("legacy", "spatial", "auto")
-SPATIAL_VARIANTS = ("d", "conservative", "global", "adaptive", "adaptive-conservative")
+SPATIAL_VARIANTS = ("d", "conservative", "global", "adaptive", "adaptive-conservative",
+                    "range", "compress", "local", "guarded")
+ADAPTIVE_VARIANTS = ("adaptive", "adaptive-conservative", "range", "compress", "local", "guarded")
 
 
 def _sha1(path: Path) -> str:
@@ -105,24 +107,47 @@ def global_index(cells: np.ndarray, centre: np.ndarray, tone: dict,
     return np.rint(c * (len(ramp) - 1)).astype(np.uint8), (c * 255.0).astype(np.uint8)
 
 
-def spatial_index(cells: np.ndarray, base: np.ndarray, target: float,
-                  ramp: str = DEFAULT_RAMP, conservative: bool = False,
-                  stats: dict | None = None):
+def _variant_values(cells: np.ndarray, base: np.ndarray, target: float,
+                    variant: str) -> np.ndarray:
     detail = cells - base
     gain = np.clip((target / np.maximum(base, 0.002)) ** 0.5, 0.45, 4.0)
     gate = smoothstep(np.abs(detail), 0.008, 0.045)
     gain = 1.0 + (gain - 1.0) * gate
-    v = np.clip(base * gain + detail, 0.0, 1.0)
+    if variant == "local":
+        local = luma.local_std(cells, 2)
+        boost = np.clip(0.20 / np.maximum(local, 0.006), 0.65, 2.4)
+        detail = detail * boost
+    return np.clip(base * gain + detail, 0.0, 1.0)
+
+
+def spatial_index(cells: np.ndarray, base: np.ndarray, target: float,
+                  ramp: str = DEFAULT_RAMP, conservative: bool = False,
+                  stats: dict | None = None, variant: str = ""):
+    st = stats or {}
+    v = _variant_values(cells, base, target, variant)
+    if variant in ("range", "compress", "local"):
+        lo = float(st.get("v_p02", SPATIAL["index_floor"]))
+        hi = float(st.get("v_p98", SPATIAL["index_span"] + lo))
+        c = np.clip((v - lo) / max(1e-6, hi - lo), 0.0, 1.0)
+        if variant == "compress":
+            # Soft highlight shoulder: keeps 0/1 fixed while compressing the
+            # upper range instead of clipping every value above 0.40.
+            c = c * 1.6 / (1.0 + 0.6 * c)
+        else:
+            c = c ** 0.92
+        idx = np.rint(c * (len(ramp) - 1)).astype(np.uint8)
+        tone = (v * 255.0).astype(np.uint8)
+        return idx, tone
     c = np.clip((v - SPATIAL["index_floor"]) / SPATIAL["index_span"], 0.0, 1.0) ** SPATIAL["index_gamma"]
     idx = np.rint(c * (len(ramp) - 1)).astype(np.uint8)
     tone = (v * 255.0).astype(np.uint8)
     if not conservative:
         return idx, tone
-    st = stats or {}
     edge_p50 = float(st.get("edge_p50", 0.02))
     edge_p85 = float(st.get("edge_p85", 0.08))
     std_p50 = float(st.get("std_p50", 0.004))
     std_p85 = float(st.get("std_p85", 0.02))
+    detail = cells - base
     edge_rel = np.abs(detail) / np.maximum(base, 0.002)
     local = luma.local_std(cells, D_CONSERVATIVE["radius"])
     keep = np.maximum.reduce([
@@ -134,8 +159,13 @@ def spatial_index(cells: np.ndarray, base: np.ndarray, target: float,
     out[keep < D_CONSERVATIVE["empty_below"]] = 0
     mid = (keep >= D_CONSERVATIVE["empty_below"]) & (keep < D_CONSERVATIVE["reduce_below"])
     out[mid] = np.maximum(0, idx[mid].astype(np.int16) - 1).astype(np.uint8)
-    # Bright/high-contrast glyphs are never removed by the negative-space pass.
-    out[idx >= (len(ramp) - 2)] = idx[idx >= (len(ramp) - 2)]
+    # The fixed D-Conservative rule protects every dense glyph.  The
+    # experimental "guarded" variant protects them only where local contrast
+    # actually justifies the density.
+    dense = idx >= (len(ramp) - 2)
+    if variant == "guarded":
+        dense = dense & ((edge_rel >= edge_p85) | (local >= std_p85))
+    out[dense] = idx[dense]
     return out, tone
 
 
@@ -176,7 +206,7 @@ def _shot_bounds(cuts: list[float], total: int) -> list[tuple[int, int]]:
 
 
 def adaptive_stats(project, data: dict, plan: dict, kind: str,
-                   conservative: bool) -> dict:
+                   conservative: bool, variant: str = '') -> dict:
     """Per-shot targets plus a slow, flash-safe intra-shot target curve."""
     frames = sorted((project.path / "analysis").glob("f_*.png"))
     if not frames:
@@ -187,10 +217,13 @@ def adaptive_stats(project, data: dict, plan: dict, kind: str,
     times = np.array([(i * step) / 10.0 for i in range(len(frames))], dtype=np.float32)
     medians, means = [], []
     edge_values, std_values = [], []
+    cells_list, base_list = [], []
     for path in frames:
         im = Image.open(path).convert("RGB")
         cells, centre = luma.linear_luma_cell_samples(im, data["grid"]["cols"], data["grid"]["rows"])
         base = bilateral(cells)
+        cells_list.append(cells)
+        base_list.append(base)
         medians.append(float(np.median(cells)))
         means.append(float(np.mean(np.asarray(im.convert("L"), dtype=np.float32)) / 255.0))
         if kind == "conservative":
@@ -261,6 +294,18 @@ def adaptive_stats(project, data: dict, plan: dict, kind: str,
                 "std_p50": float(np.percentile(shot_stds, 50)),
                 "std_p85": float(np.percentile(shot_stds, 85)),
             })
+        if variant in ("range", "compress", "local") and idx:
+            values = []
+            for i in idx:
+                frame = max(1, min(total, int(round(times[i] * 30)) + 1))
+                values.append(_variant_values(cells_list[i], base_list[i],
+                                              float(curve[frame - 1]), variant).ravel())
+            merged = np.concatenate(values)
+            shot.update({
+                "v_p02": float(np.percentile(merged, 2)),
+                "v_p50": float(np.percentile(merged, 50)),
+                "v_p98": float(np.percentile(merged, 98)),
+            })
         shots.append(shot)
     return {
         "adaptive": True,
@@ -278,7 +323,7 @@ def shot_stats_at(stats: dict, frame: int) -> dict:
     return stats.get("shots", [{}])[0] if stats.get("shots") else {}
 
 
-def analysis_stats(project, data: dict, plan: dict) -> dict:
+def analysis_stats(project, data: dict, plan: dict, variant: str = '') -> dict:
     """Target and local-structure percentiles from the 10 fps analysis frames."""
     frames = sorted((project.path / "analysis").glob("f_*.png"))
     if not frames:
@@ -298,7 +343,7 @@ def analysis_stats(project, data: dict, plan: dict) -> dict:
         stds.append(luma.local_std(cells, D_CONSERVATIVE["radius"]).ravel())
     edge = np.concatenate(edges)
     std = np.concatenate(stds)
-    return {
+    out = {
         "target": float(np.median(medians)),
         "p50": float(np.median(np.concatenate([np.array([m]) for m in medians]))),
         "edge_p50": float(np.percentile(edge, 50)),
@@ -307,9 +352,22 @@ def analysis_stats(project, data: dict, plan: dict) -> dict:
         "std_p85": float(np.percentile(std, 85)),
         "analysis_frames": len(frames),
     }
+    if variant in ("range", "compress", "local") and frames:
+        target = out["target"]
+        values = []
+        for path in frames:
+            im = Image.open(path).convert("RGB")
+            cells, _ = luma.linear_luma_cell_samples(im, data["grid"]["cols"], data["grid"]["rows"])
+            values.append(_variant_values(cells, bilateral(cells), target, variant).ravel())
+        merged = np.concatenate(values)
+        out.update({"v_p02": float(np.percentile(merged, 2)),
+                    "v_p50": float(np.percentile(merged, 50)),
+                    "v_p98": float(np.percentile(merged, 98))})
+    return out
 
 
-def _map_params(data: dict, plan: dict, kind: str, conservative: bool, stats: dict) -> dict:
+def _map_params(data: dict, plan: dict, kind: str, conservative: bool, stats: dict,
+                variant: str = '') -> dict:
     out = {
         "renderer_version": RENDERER_VERSION,
         "grid": [data["grid"]["cols"], data["grid"]["rows"]],
@@ -327,26 +385,31 @@ def _map_params(data: dict, plan: dict, kind: str, conservative: bool, stats: di
     }
     if stats.get("adaptive"):
         out["adaptive"] = True
+    if variant:
+        out["variant"] = variant
     return out
 
 
 def map_key(project, data: dict, plan: dict, kind: str, conservative: bool,
-            stats: dict) -> str:
+            stats: dict, variant: str = '') -> str:
     payload = {
         "source": _sha1(Path(project.working_source)),
         "preset": _sha1(PRESET_BLEND),
-        "params": _map_params(data, plan, kind, conservative, stats),
+        "params": _map_params(data, plan, kind, conservative, stats, variant),
     }
     return _json_sha1(payload)
 
 
 def _manifest_valid(folder: Path, manifest: dict, end: int, data: dict,
-                    kind: str, conservative: bool, adaptive: bool = False) -> bool:
+                    kind: str, conservative: bool, adaptive: bool = False,
+                    variant: str = '') -> bool:
     if not manifest or manifest.get("renderer_version") != RENDERER_VERSION:
         return False
     if manifest.get("kind") != kind or bool(manifest.get("conservative")) != bool(conservative):
         return False
     if bool(manifest.get("adaptive")) != bool(adaptive):
+        return False
+    if variant and manifest.get("variant") != variant:
         return False
     if manifest.get("grid") != [data["grid"]["cols"], data["grid"]["rows"]]:
         return False
@@ -424,7 +487,7 @@ def validate_renders(frames_dir: Path, maps_dir: Path, end: int, cols: int, rows
 
 def ensure_maps(project, data: dict, plan: dict, end: int, kind: str = "spatial",
                 conservative: bool = False, progress=None, cancel=None,
-                start: int = 1, adaptive: bool = False) -> dict:
+                start: int = 1, adaptive: bool = False, variant: str = '') -> dict:
     """Generate or reuse deterministic tone/index maps for render frames."""
     if kind not in ("global", "spatial", "conservative"):
         raise ValueError(f"Tipo mappa non valido: {kind}")
@@ -434,10 +497,10 @@ def ensure_maps(project, data: dict, plan: dict, end: int, kind: str = "spatial"
         stats = {"target": 0.0, "p50": 0.0, "edge_p50": 0.0, "edge_p85": 0.0,
                  "std_p50": 0.0, "std_p85": 0.0, "analysis_frames": 0}
     elif adaptive:
-        stats = adaptive_stats(project, data, plan, kind, conservative)
+        stats = adaptive_stats(project, data, plan, kind, conservative, variant)
     else:
-        stats = analysis_stats(project, data, plan)
-    key = map_key(project, data, plan, kind, conservative, stats)
+        stats = analysis_stats(project, data, plan, variant)
+    key = map_key(project, data, plan, kind, conservative, stats, variant)
     root = project.path / "temp" / "spatial" / key
     idx_dir = root / "idx"
     tone_dir = root / "tone"
@@ -445,7 +508,7 @@ def ensure_maps(project, data: dict, plan: dict, end: int, kind: str = "spatial"
     tone_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = root / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {}
-    if _manifest_valid(root, manifest, end, data, kind, conservative, adaptive):
+    if _manifest_valid(root, manifest, end, data, kind, conservative, adaptive, variant):
         try:
             checked = validate_index_maps(root, end, data["grid"]["cols"], data["grid"]["rows"], data["ramp"])
             if checked["index_root"] != manifest.get("index_root"):
@@ -492,7 +555,8 @@ def ensure_maps(project, data: dict, plan: dict, end: int, kind: str = "spatial"
                     target = stats["target_curve"][frame - 1] if adaptive else stats["target"]
                     frame_stats = shot_stats_at(stats, frame) if adaptive else stats
                     idx, tone = spatial_index(cells, base, target, data["ramp"],
-                                              conservative=conservative, stats=frame_stats)
+                                              conservative=conservative, stats=frame_stats,
+                                              variant=variant)
                 encode_index(idx, data["ramp"]).save(out_idx)
                 Image.fromarray(tone, mode="L").save(out_tone)
             done += 1
@@ -511,7 +575,7 @@ def ensure_maps(project, data: dict, plan: dict, end: int, kind: str = "spatial"
     validate_index_maps(root, end, cols, rows, data["ramp"])
     index_root = _index_root(root, end)
     manifest = {
-        **_map_params(data, plan, kind, conservative, stats),
+        **_map_params(data, plan, kind, conservative, stats, variant),
         "frames": end,
         "index_root": index_root,
         "source": str(project.working_source),

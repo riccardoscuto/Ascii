@@ -284,14 +284,16 @@ def _ensure_maps(project, data: dict, plan: dict, end: int,
     variant = _variant(project)
     kind = {"d": "spatial", "conservative": "conservative",
             "adaptive": "spatial", "adaptive-conservative": "conservative",
-            "global": "global"}[variant]
+            "global": "global", "range": "spatial", "compress": "spatial",
+            "local": "spatial", "guarded": "conservative"}[variant]
     started = time.time()
     try:
         manifest = spatial.ensure_maps(
             project, data, plan, end=end, kind=kind,
-            conservative=variant in ("conservative", "adaptive-conservative"),
-            adaptive=variant in ("adaptive", "adaptive-conservative"),
-            progress=progress, cancel=cancel)
+            conservative=variant in ("conservative", "adaptive-conservative", "guarded"),
+            adaptive=variant in spatial.ADAPTIVE_VARIANTS,
+            progress=progress, cancel=cancel,
+            variant=variant if variant in ("range", "compress", "local", "guarded") else "")
     except RuntimeError as exc:
         if cancel is not None and cancel.is_set():
             raise AsciiCanceled("Generazione mappe interrotta.") from exc

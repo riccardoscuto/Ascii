@@ -526,3 +526,13 @@ Verificare copertina, numero, reveal e transizione su `_discovery/graphics_test_
 - Riesame nuovo motore: 2/6 corretti, 4/6 ancora errati. Target 90% non raggiunto; Auto non va in GUI.
 - Verticale/analysis 180x320, audio, cache, stop/ripresa e transizione 3.1 s verificati.
 - Dettagli: docs/ASCII_MILESTONE7_2.md.
+
+## Milestone 8 — Renderer Quality & Adaptive Reconstruction (2026-11-25)
+
+- Metriche corrette (griglia 96x54 / 144x81, highlight interni, UI a dettaglio, colore cromatico, flicker spaziale).
+- Varianti sperimentali range/compress/local/guarded: riducono l'indice 8 di NieR dal 23% al 4-5%; vincono su scuro/foresta, non su villaggio/montagna.
+- Ricostruzione decoupled con atlante Bfont: migliore su scuro, foresta, Balatro e alte luci; non uniformemente migliore.
+- Scoperto difetto di layout dei glifi nel preset Blender approvato (celle indice 0 con inchiostro, indice 8 al 66%); correzione sperimentale non risolta, non promossa.
+- Balatro: 192x108 migliore, 144x81 vicino, 96x54 perde testo; saturazione indici stabile ~11%.
+- Confronti anonimi 5 s in _discovery/milestone8/anonymous/; gate non superato, Auto non approvato.
+- Dettagli: docs/ASCII_MILESTONE8.md.

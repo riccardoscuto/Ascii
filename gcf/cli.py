@@ -23,6 +23,7 @@ from gcf.config import ROOT, ffmpeg_bin, ffprobe_bin, project_dir
 from gcf.ascii.project import AsciiProject
 from gcf.ascii import preset as ascii_preset
 from gcf.ascii import render as ascii_render
+from gcf.ascii import spatial as ascii_spatial
 from gcf.ascii import selector as ascii_selector
 from gcf.guess.cover import build_cover
 from gcf.guess.round import InsufficientMaterial

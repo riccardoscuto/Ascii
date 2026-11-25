@@ -63,4 +63,5 @@ spatial tone-mapping validation is `docs/ASCII_SPATIAL_MOTION_VALIDATION.md`, wi
 Milestone 6 backend report in `docs/ASCII_MILESTONE6.md`, the Milestone 7 adaptive report
 in `docs/ASCII_MILESTONE7.md`, the independent M7.1 validation in
 `docs/ASCII_MILESTONE7_1.md`, the M7.2 unified/perceptual gate in
-`docs/ASCII_MILESTONE7_2.md`, and the selector design in `docs/ASCII_AUTO_SELECTOR.md`.
+`docs/ASCII_MILESTONE7_2.md`, the M8 renderer-quality gate in
+`docs/ASCII_MILESTONE8.md`, and the selector design in `docs/ASCII_AUTO_SELECTOR.md`.

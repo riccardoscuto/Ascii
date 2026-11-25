@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import numpy as np
 from PIL import Image
 
-from gcf.ascii import correction, luma, perceptual, preset, selector, spatial
+from gcf.ascii import correction, luma, perceptual, preset, reference, selector, spatial
 from gcf.ascii import render as render_mod
 
 
@@ -85,14 +85,15 @@ class SpatialUnitTests(unittest.TestCase):
         base = {"structure": 0.8, "edge_ssim": 0.8, "shadow": 0.8,
                 "highlight": 0.8, "uniform": 0.9, "color": 0.8, "ui": 0.8,
                 "render_mean": 20.0, "render_max": 200}
-        good = selector._score(base, 0.02)
-        dense = selector._score({**base, "uniform": 0.4}, 0.02)
+        temporal = {"flicker": 0.02, "motion_corr": 1.0}
+        good = selector._score(base, temporal)
+        dense = selector._score({**base, "uniform": 0.4}, temporal)
         self.assertGreater(good, dense)
-        self.assertEqual(selector._score({**base, "render_mean": 0.1}, 0.02), -1.0)
+        self.assertEqual(selector._score({**base, "render_mean": 0.1}, temporal), -1.0)
 
     def test_perceptual_common_grid_and_metrics(self):
-        self.assertEqual(perceptual.common_grid("horizontal"), (64, 36))
-        self.assertEqual(perceptual.common_grid("vertical"), (36, 64))
+        self.assertEqual(perceptual.common_grid("horizontal"), (96, 54))
+        self.assertEqual(perceptual.common_grid("vertical"), (54, 96))
         source = Image.new("RGB", (1920, 1080), (180, 180, 180))
         rendered = Image.new("RGB", (1920, 1080), (0, 0, 0))
         m = perceptual.metrics(source, rendered, "horizontal", 0.31)
@@ -100,6 +101,74 @@ class SpatialUnitTests(unittest.TestCase):
                     "uniform", "color", "ui", "coverage"):
             self.assertIn(key, m)
             self.assertTrue(0.0 <= m[key] <= 1.0)
+
+    def test_highlight_and_ui_reject_flat_white(self):
+        from PIL import ImageDraw
+        size = (960, 540)
+        source = Image.new("RGB", size, (8, 8, 8))
+        draw = ImageDraw.Draw(source)
+        for y in range(80, 460, 20):
+            for x in range(120, 840, 20):
+                value = 180 + ((x // 20 + y // 20) % 3) * 18
+                draw.rectangle([x, y, x + 18, y + 18], fill=(value, value, value))
+        varied = Image.new("RGB", size, (0, 0, 0))
+        vdraw = ImageDraw.Draw(varied)
+        for y in range(80, 460, 20):
+            for x in range(120, 840, 20):
+                value = 110 + ((x // 20 + y // 20) % 3) * 55
+                vdraw.rectangle([x, y, x + 18, y + 18], fill=(value, value, value))
+        flat = Image.new("RGB", size, (0, 0, 0))
+        ImageDraw.Draw(flat).rectangle([120, 80, 840, 460], fill=(255, 255, 255))
+        good = perceptual.metrics(source, varied, "horizontal", 0.31)
+        bad = perceptual.metrics(source, flat, "horizontal", 0.31)
+        self.assertGreater(good["highlight"], bad["highlight"])
+        self.assertGreater(good["ui"], bad["ui"])
+
+    def test_adaptive_range_maps_scene_percentiles_to_full_index_range(self):
+        cells = np.array([[0.10, 0.50, 0.90]], dtype=np.float32)
+        base = cells.copy()
+        stats = {"v_p02": 0.10, "v_p98": 0.90}
+        idx, _ = spatial.spatial_index(cells, base, 0.5, variant="range", stats=stats)
+        self.assertEqual(idx[0, 0], 0)
+        self.assertEqual(idx[0, 2], 8)
+        idx_c, _ = spatial.spatial_index(cells, base, 0.5, variant="compress", stats=stats)
+        self.assertEqual(idx_c[0, 0], 0)
+        self.assertEqual(idx_c[0, 2], 8)
+
+    def test_reference_rasterizer_places_glyph_in_its_cell(self):
+        tiles = np.zeros((2, 8, 8), dtype=np.float32)
+        tiles[1] = 1.0
+        atlas = {"ramp": " @", "tiles": tiles, "tile": 8,
+                 "coverage": np.array([0.0, 1.0], dtype=np.float32)}
+        indices = np.array([[0, 1]], dtype=np.int16)
+        colors = np.full((1, 2, 3), 0.5, dtype=np.float32)
+        out = reference.raster_array(indices, colors, atlas, cell_px=4)
+        self.assertEqual(out.shape, (4, 8, 3))
+        self.assertTrue(np.all(out[:, :4] == 0))
+        self.assertTrue(np.all(out[:, 4:] == 127))
+
+    def test_temporal_flicker_separates_static_from_source_motion(self):
+        black = Image.new("RGB", (320, 180), (0, 0, 0))
+        white = Image.new("RGB", (320, 180), (255, 255, 255))
+        gray = Image.new("RGB", (320, 180), (120, 120, 120))
+        static = perceptual.temporal_flicker([gray, gray], [black, white], "horizontal")
+        moving = perceptual.temporal_flicker([black, white], [black, white], "horizontal")
+        self.assertGreater(static["flicker"], moving["flicker"])
+        self.assertLess(static["motion_corr"], 0.5)
+
+    def test_source_stats_distinguishes_intentional_black(self):
+        import tempfile
+        from pathlib import Path as _Path
+        from PIL import Image as _Image
+        with tempfile.TemporaryDirectory() as folder:
+            root = _Path(folder)
+            black = root / "b.png"
+            gray = root / "g.png"
+            _Image.new("RGB", (64, 36), (0, 0, 0)).save(black)
+            _Image.new("RGB", (64, 36), (120, 120, 120)).save(gray)
+            self.assertTrue(selector._source_stats([black])["black"])
+            self.assertFalse(selector._source_stats([gray])["black"])
+            self.assertGreater(selector._source_stats([gray])["p50"], 0.1)
 
     def test_selector_vertical_resolution(self):
         self.assertEqual(selector._resolution("horizontal"), (1920, 1080))

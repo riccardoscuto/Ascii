@@ -1,10 +1,15 @@
 # Auto ASCII Selector — architettura e prototipo
 
 Stato: **motore unificato, non approvato per la GUI**.
-M7.2 ha unificato select() su evaluate_shot(), rimosso il vecchio rescore, aggiunto
-la rappresentazione comune e le metriche percettive, e valutato entrambe le palette per
-ogni modalità. Sul riesame dei sei errori: 2 corretti, 4 ancora regressivi (NieR esplosione,
-Balatro 0/1/2). Target 90% non raggiunto. scii_mode=auto nel renderer diretto resta
+
+M7.2 ha unificato select() su evaluate_shot() e rimosso il vecchio rescore.
+M8 ha corretto le metriche residue: griglia comune 96×54 / 54×96, dettaglio UI a
+144×81 / 81×144, normalizzazione separata, highlight interni, colore cromatico,
+flicker spaziale, rifiuto dei candidati con window_errors o frame tecnici invalidi,
+e no-choice distinto tra scena nera intenzionale, conversione fallita ed errore tecnico.
+M8 ha anche scoperto un difetto di layout dei glifi nel preset Blender approvato: il
+selettore non può compensarlo. Auto non è stato rieseguito sui 25 shot e resta non
+approvato. Target 90% non raggiunto. `ascii_mode="auto"` nel renderer diretto resta
 rifiutata; la decisione vive in gcf/ascii/selector.py.
 
 ## Obiettivo

@@ -122,10 +122,12 @@ def _candidate_metrics(project, candidate, client_project, source: Image.Image,
     return m
 
 
-def _score(metrics: dict, temporal: float) -> float:
+def _score(metrics: dict, temporal: dict) -> float:
     if metrics.get("render_max", 0) < 8 or metrics.get("render_mean", 0) < 0.75:
         return -1.0
-    temporal_score = max(0.0, 1.0 - min(1.0, temporal * 5.0))
+    flicker = float(temporal.get("flicker", 1.0))
+    motion = float(temporal.get("motion_corr", 0.0))
+    temporal_score = 0.6 * max(0.0, 1.0 - min(1.0, flicker * 8.0)) + 0.4 * max(0.0, motion)
     return (0.30 * metrics["structure"] + 0.10 * metrics["edge_ssim"]
             + 0.15 * metrics["shadow"] + 0.10 * metrics["highlight"]
             + 0.15 * metrics["uniform"] + 0.05 * metrics["color"]
@@ -155,33 +157,69 @@ def _index_cells(candidate, frame: int, lit: np.ndarray) -> np.ndarray:
     return np.rint(lit * 8.0)
 
 
-def _windows_for(candidate, source: str, fmt: str, start: float, duration: float,
+def _source_stats(frames: list[Path]) -> dict:
+    if not frames:
+        return {"p50": 0.0, "p95": 0.0, "mean": 0.0, "sat": 0.0,
+                "black": True, "frames": 0}
+    p50, p95, means, sats = [], [], [], []
+    for path in frames:
+        im = Image.open(path).convert("RGB")
+        lum = luma.linear_luma_array(im)
+        p50.append(float(np.percentile(lum, 50)))
+        p95.append(float(np.percentile(lum, 95)))
+        means.append(float(np.mean(lum)))
+        sats.append(float(np.mean(np.asarray(im.convert("HSV").getchannel("S"),
+                                           dtype=np.float32)) / 255.0))
+    black = bool(max(p95) < 0.02 and max(means) < 0.005)
+    return {"p50": round(float(np.median(p50)), 4),
+            "p95": round(float(np.median(p95)), 4),
+            "mean": round(float(np.median(means)), 4),
+            "sat": round(float(np.median(sats)), 3),
+            "black": black, "frames": len(frames)}
+
+
+def _windows_for(candidate, fmt: str, source_windows: list[list[Path]],
                  evidence: Path, tag: str, cols: int, rows: int) -> dict:
     metrics = []
     invalid = []
     window_errors = []
-    excess = []
+    temporal = {"flicker": 0.0, "motion_corr": 0.0, "static_motion": 0.0}
     samples = []
-    for w, rel in enumerate((0.15, 0.45, 0.75)):
-        first = max(1, int(round(rel * duration * 30)) + 1)
+    for w, srcs in enumerate(source_windows):
+        rel = (0.15, 0.45, 0.75)[w]
+        first = max(1, int(round(rel * candidate.interval_duration * 30)) + 1)
         last = first + 2
         outdir = candidate.path / "temp" / f"selector_w{w}"
-        frames = render.render_window(candidate, first, last, outdir)
-        srcs = _source_window(source, fmt, start + (first - 1) / 30.0, 3,
-                              evidence / f"{tag}_src_w{w}")
-        n = min(len(frames), len(srcs))
+        frames = None
+        error = ""
+        for attempt in range(2):
+            try:
+                frames = render.render_window(candidate, first, last, outdir)
+                if len(frames) == 3:
+                    break
+            except Exception as exc:
+                error = f"{type(exc).__name__}: {exc}"
+        if frames is None or len(frames) < 2:
+            window_errors.append({"window": w, "reason": "render", "error": error})
+            continue
         if len(frames) != 3 or len(srcs) != 3:
-            window_errors.append({"window": w, "frames": len(frames), "source_frames": len(srcs)})
-        for f in frames[:n]:
+            window_errors.append({"window": w, "frames": len(frames),
+                                  "source_frames": len(srcs)})
+        n = min(len(frames), len(srcs))
+        if n < 2:
+            window_errors.append({"window": w, "reason": "incomplete"})
+            continue
+        for frame_index, f in enumerate(frames[:n]):
             im = Image.open(f).convert("L")
             h = im.histogram()
             mean = sum(k * c for k, c in enumerate(h)) / (im.width * im.height)
             hi = max(i for i, c in enumerate(h) if c)
-            if mean < 0.75 or hi < 8:
+            source_im = Image.open(srcs[frame_index]).convert("L")
+            source_hist = source_im.histogram()
+            source_mean = (sum(k * c for k, c in enumerate(source_hist))
+                           / (source_im.width * source_im.height))
+            if (mean < 0.75 or hi < 8) and source_mean > 2.0:
                 invalid.append((w, f.name, round(mean, 2), hi))
-        if n < 2:
-            window_errors.append({"window": w, "reason": "incomplete"})
-            continue
         mid = n // 2
         src = Image.open(srcs[mid]).convert("RGB")
         ren = frames[mid]
@@ -189,22 +227,23 @@ def _windows_for(candidate, source: str, fmt: str, start: float, duration: float
                                still_path=ren)
         metrics.append(m)
         samples.append({"window": w, "source": str(srcs[mid]), "candidate": str(ren)})
-        lits = [_lit_cells(f, cols, rows) for f in frames[:n]]
-        src_cells = [luma.linear_cells(Image.open(s).convert("RGB"), cols, rows)
-                     for s in srcs[:n]]
-        for i in range(1, n):
-            sd = float(np.mean(np.abs(src_cells[i] - src_cells[i - 1])))
-            cd = float(np.mean(np.abs(lits[i] - lits[i - 1]))) * 8.0
-            excess.append(max(0.0, cd - sd * 8.0 * 1.5))
+        if n >= 2:
+            pair = perceptual.temporal_flicker(
+                [Image.open(s).convert("RGB") for s in srcs[:n]],
+                [Image.open(f).convert("RGB") for f in frames[:n]], fmt)
+            temporal["flicker"] = max(temporal["flicker"], pair["flicker"])
+            temporal["motion_corr"] = max(temporal["motion_corr"], pair["motion_corr"])
+            temporal["static_motion"] = max(temporal["static_motion"], pair["static_motion"])
     avg = {}
-    for key in ("structure", "edge_ssim", "shadow", "highlight", "uniform",
-                "color", "ui", "coverage", "ssim", "edge_corr", "contrast",
+    for key in ("structure", "ssim", "ssim_cov", "ssim_glyph", "edge_ssim",
+                "shadow", "highlight", "uniform", "color", "ui", "coverage",
+                "coverage_std", "edge_corr", "contrast", "glyph_luma",
                 "render_mean", "render_max"):
         vals = [m[key] for m in metrics if key in m]
         avg[key] = round(float(np.mean(vals)), 4) if vals else 0.0
-    temporal = float(np.mean(excess)) if excess else 1.0
-    score = -1.0 if invalid or avg.get("render_max", 0) < 8 else _score(avg, min(0.2, temporal))
-    return {"metrics": avg, "temporal_excess": round(temporal, 4),
+    valid = len(metrics) >= 2 and not window_errors and not invalid
+    score = _score(avg, temporal) if valid else -1.0
+    return {"metrics": avg, "temporal": temporal,
             "invalid_frames": invalid, "window_errors": window_errors,
             "score": round(score, 4), "frames": len(metrics), "samples": samples}
 
@@ -213,9 +252,14 @@ def evaluate_shot(source: str, fmt: str, start: float, duration: float,
                   evidence_dir: Path, tag: str, windows: int = 3,
                   compare_color: bool = True, base_params: dict | None = None,
                   already_working: bool = False) -> dict:
-    """Evaluate Legacy/Spatial/Conservative on representative consecutive windows."""
+    """Evaluate Legacy/Spatial/Conservative on representative windows.
+
+    Source statistics come from the same frames used for every candidate, so
+    black scenes, failed conversions and technical render errors are distinct.
+    """
     evidence_dir.mkdir(parents=True, exist_ok=True)
     original_source = source
+    original_start = start
     base_params = {**(base_params or {}), "gamma": (base_params or {}).get("gamma", 0.82),
                    "shadow": (base_params or {}).get("shadow", 0.31),
                    "contrast_high": (base_params or {}).get("contrast_high", 0.85)}
@@ -225,52 +269,100 @@ def evaluate_shot(source: str, fmt: str, start: float, duration: float,
         media.prepare_working(probe)
         source = probe.working_source
         start = 0.0
-    grid = preset.grid_for(fmt, 81)
-    mid = _source_frame(source, start + duration / 2, evidence_dir / f"{tag}_char.png", fmt)
-    cells = luma.linear_cells(mid, grid["cols"], grid["rows"]).ravel()
-    p50m = float(np.median(cells))
-    satm = float(np.mean(np.asarray(mid.convert("HSV").getchannel("S"), dtype=np.float32)) / 255.0)
+    rels = (0.15, 0.45, 0.75)
+    source_windows = []
+    for w, rel in enumerate(rels):
+        source_windows.append(_source_window(source, fmt, start + rel * duration, 3,
+                                              evidence_dir / f"{tag}_src_w{w}"))
+    stats = _source_stats([p for window in source_windows for p in window])
+    grid = perceptual.detail_grid(fmt)
+    p50s, sats = [], []
+    for window in source_windows:
+        for path in window:
+            im = Image.open(path).convert("RGB")
+            cells = luma.linear_cells(im, grid[0], grid[1]).ravel()
+            p50s.append(float(np.median(cells)))
+            sats.append(float(np.mean(np.asarray(im.convert("HSV").getchannel("S"),
+                                                 dtype=np.float32)) / 255.0))
+    p50m = float(np.median(p50s)) if p50s else 0.0
+    satm = float(np.median(sats)) if sats else 0.0
+    color_mode = 0.0 if satm > 0.18 and p50m > 0.015 else 1.0
+    auto = bool(not stats["black"] and stats["p50"] < 0.09
+                and stats["p95"] > 0.12 and stats["p95"] - stats["p50"] > 0.05)
+    conversion_failed = False
+    if not already_working:
+        try:
+            original = _source_frame(original_source, original_start + duration / 2,
+                                     evidence_dir / f"{tag}_original_check.png", fmt)
+            original_p95 = float(np.percentile(luma.linear_luma_array(original), 95))
+            conversion_failed = bool(original_p95 > 0.05 and stats["p95"] < 0.02)
+        except Exception:
+            conversion_failed = False
     character = {"p50": round(p50m, 4), "sat": round(satm, 3),
-                 "color_mode": 0.0 if satm > 0.18 and p50m > 0.015 else 1.0}
-    character["auto_correction"] = bool(character["color_mode"] == 1.0 and p50m < 0.03)
+                 "p95": stats["p95"], "mean": stats["mean"],
+                 "color_mode": color_mode, "auto_correction": auto,
+                 "scene_black": stats["black"],
+                 "conversion_failed": conversion_failed,
+                 "analysis_frames": stats["frames"]}
     candidates = {}
     for name, spec in CANDIDATES.items():
         variants = {}
         for color in (character["color_mode"], 1.0 - character["color_mode"]):
             params = {**base_params, "density": spec["density"],
-                      "color_mode": color,
-                      "auto_correction": bool(p50m < 0.03)}
-            cand = AsciiProject.create(source, fmt, start, duration, params,
-                                       title=f"M72 {tag} {name} c{int(color)}",
-                                       ascii_mode=spec["mode"], spatial_variant=spec["variant"])
-            cgrid = perceptual.common_grid(fmt)
-            result = _windows_for(cand, source, fmt, start, duration, evidence_dir,
-                                  f"{tag}_{name}_c{int(color)}", cgrid[0], cgrid[1])
-            variants[color] = {"project": str(cand.path), "mode": spec["mode"],
-                               "variant": spec["variant"], "density": spec["density"],
-                               "color_mode": color, **result}
-        best_color = max(variants, key=lambda c: variants[c]["score"])
+                      "color_mode": color, "auto_correction": auto}
+            try:
+                cand = AsciiProject.create(source, fmt, start, duration, params,
+                                           title=f"M72 {tag} {name} c{int(color)}",
+                                           ascii_mode=spec["mode"],
+                                           spatial_variant=spec["variant"])
+                cgrid = perceptual.common_grid(fmt)
+                result = _windows_for(cand, fmt, source_windows, evidence_dir,
+                                      f"{tag}_{name}_c{int(color)}", cgrid[0], cgrid[1])
+                variants[color] = {"project": str(cand.path), "mode": spec["mode"],
+                                   "variant": spec["variant"], "density": spec["density"],
+                                   "color_mode": color, **result}
+            except Exception as exc:
+                variants[color] = {"project": "", "mode": spec["mode"],
+                                   "variant": spec["variant"], "density": spec["density"],
+                                   "color_mode": color, "metrics": {}, "score": -1.0,
+                                   "temporal": {"flicker": 1.0, "motion_corr": 0.0},
+                                   "invalid_frames": [], "window_errors": [
+                                       {"reason": "candidate", "error": f"{type(exc).__name__}: {exc}"}],
+                                   "frames": 0, "samples": []}
+        valid = {c: v for c, v in variants.items() if v["score"] >= 0}
+        if valid:
+            best_color = max(valid, key=lambda c: valid[c]["score"])
+        else:
+            best_color = min(variants, key=lambda c: len(variants[c].get("window_errors", [])))
         candidates[name] = variants[best_color]
         candidates[name]["color_variants"] = {str(int(c)): variants[c]["score"] for c in variants}
     ordered = sorted(candidates.items(), key=lambda kv: kv[1]["score"], reverse=True)
     chosen = ordered[0][0]
     reason = "highest score"
-    if candidates["legacy"]["score"] >= ordered[0][1]["score"] - 0.010:
+    if candidates["legacy"]["score"] >= ordered[0][1]["score"] - 0.010 and ordered[0][1]["score"] >= 0:
         chosen = "legacy"
         reason = "baseline within margin"
-    elif len(ordered) > 1 and ordered[0][1]["score"] - ordered[1][1]["score"] < 0.008:
-        stable = min((ordered[0], ordered[1]), key=lambda kv: kv[1]["temporal_excess"])
+    elif (len(ordered) > 1 and ordered[0][1]["score"] >= 0
+          and 0 <= ordered[0][1]["score"] - ordered[1][1]["score"] < 0.008):
+        stable = min((ordered[0], ordered[1]),
+                     key=lambda kv: kv[1]["temporal"]["flicker"])
         chosen = stable[0]
-        reason = "close scores, lower temporal excess"
-    unreadable = ordered[0][1]["score"] < 0.30 or all(v["score"] < 0 for v in candidates.values())
-    if unreadable:
-        chosen = "none"
-        reason = "no acceptable candidate"
+        reason = "close scores, lower static-cell flicker"
+    technical = all(v["score"] < 0 for v in candidates.values())
+    if stats["black"]:
+        chosen, reason = "none", "intentional black scene"
+    elif conversion_failed:
+        chosen, reason = "none", "source conversion failed"
+    elif technical:
+        chosen, reason = "none", "technical render failure"
+    elif ordered[0][1]["score"] < 0.30:
+        chosen, reason = "none", "no acceptable candidate"
+    unreadable = chosen == "none"
     return {"tag": tag, "source": original_source, "working_source": source,
             "format": fmt, "start": start, "end": start + duration,
             "duration": duration, "character": character,
-            "candidates": candidates, "selected": chosen, "reason": reason,
-            "unreadable": unreadable}
+            "source_stats": stats, "candidates": candidates,
+            "selected": chosen, "reason": reason, "unreadable": unreadable}
 
 
 def select(project, evidence_dir: Path, progress=None) -> dict:
@@ -305,8 +397,8 @@ def select(project, evidence_dir: Path, progress=None) -> dict:
             score = row["candidates"].get(row["selected"], {}).get("score", -1)
             progress(si + 1, len(shots), 0, 0, f"Shot {si + 1} · {row['selected']} · {score}")
     selection = {
-        "version": 2,
-        "engine": "unified-m72",
+        "version": 3,
+        "engine": "unified-m8-metrics",
         "mode": "auto",
         "source": project.source,
         "source_sha1": spatial._sha1(Path(shadow.working_source)),
