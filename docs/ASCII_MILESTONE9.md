@@ -128,6 +128,13 @@ Test reale di rigenerazione selettiva (`_discovery/milestone9/selective_regenera
 - il montaggio finale viene ricostruito;
 - 810 frame, 27.0 s.
 
+Test reale complementare (`_discovery/milestone9/cache_identity.json`):
+
+- cambio di titolo della copertina e della traccia musicale usata dal montaggio;
+- le nove clip ASCII restano byte-identiche (mtime e dimensione invariati);
+- nessun rendering Blender viene rieseguito;
+- il montaggio viene ricodificato e resta a 810 frame.
+
 ## 5. Collaudo end-to-end
 
 ### Tre giochi reali
