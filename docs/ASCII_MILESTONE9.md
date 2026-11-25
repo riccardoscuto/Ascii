@@ -142,8 +142,9 @@ Test reale complementare (`_discovery/milestone9/cache_identity.json`):
 `projects/short_20261125_170256` contiene Balatro, The Witcher 3 e NieR:Automata con
 tre indizi ASCII approvati e reveal originali.
 
-- `_discovery/milestone9/build.py` produce le conversioni tramite `ascii_clip` e il
-  montaggio tramite `build_short_preview`.
+- Le conversioni sono state eseguite tramite `ascii_clip` e il montaggio tramite
+  `build_short_preview`; gli script di collaudo sono stati rimossi durante la pulizia,
+  le evidenze restano in `_discovery/milestone9/`.
 - Output: `projects/short_20261125_170256/output/short_preview.mp4`.
 - 1080×1920, 30 fps, **810 frame**, 27.0 s, audio AAC.
 - Frame di controllo: `_discovery/milestone9/preview_frames/`.
@@ -187,6 +188,9 @@ Il fixture non viene dichiarato come collaudo editoriale finale.
 - Auto Selector non è stato rieseguito e non è un prerequisito.
 - La GUI non è stata riscritta; il convertitore standalone resta disponibile.
 - I preset approvati v2 e BlueFox non sono stati modificati.
+- Pulizia 2026-11-25: conservati solo `projects/short_20261125_170256` e le evidenze
+  JSON/controllo in `_discovery/milestone9`; i vecchi progetti, le clip di test e il
+  fixture a sei giochi sono stati eliminati.
 
 ## 8. Comandi utili
 
