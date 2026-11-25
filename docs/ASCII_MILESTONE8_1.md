@@ -27,7 +27,8 @@ primi test sintetici.
 
 ## 2. Gate geometrico e fotometrico
 
-`_discovery/milestone8_1/gate_report.json`.
+`_discovery/milestone8_1/gate_report.json`, visual sheet
+`_discovery/milestone8_1/synth/gate_sheet.png`.
 
 Sorgenti sintetiche, camera ortografica per il gate, stessa risoluzione effettiva per
 cella del renderer diagnostico:
@@ -96,7 +97,8 @@ Lettura:
 - **D**: vince su foresta, scuro e bird per struttura/UI/colore; su Balatro migliora il
   colore ma perde struttura/UI; su villaggio è intermedio.
 - **D Blender** (scuro): structure .659, edge .551, highlight .912, UI .798, color .782;
-  il reference D dà .712/.646/.916/.794/.827. L'integrazione con mappe separate è
+  il reference D dà .712/.646/.916/.794/.827
+(_discovery/milestone8_1/dark_D_blender.png). L'integrazione con mappe separate è
   quindi coerente, con perdita dovuta al renderer Blender.
 
 ### Decoupled: correzioni M8.1
