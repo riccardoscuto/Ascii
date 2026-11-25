@@ -15,11 +15,12 @@ rieseguito sui 25 shot.
 - `glyph-library-decoupled` — stesso renderer con mappe indice, colore e intensità
   separate.
 
-`AsciiProject.renderer` e il CLI `--renderer` selezionano il percorso. `preset.blend_for()`
-e `preset.renderer_version()` sono usati da firma cache, plan context, chiavi mappe e
-copia del preset Blender. Cambiare renderer invalida mappe, cache e piano.
+`AsciiProject.renderer` e il CLI `--renderer` selezionano il percorso.
+`preset.blend_for()` e `preset.renderer_version()` sono usati da firma cache, plan
+context, chiavi mappe e copia del preset Blender. Cambiare renderer invalida mappe,
+cache e piano.
 
-I file sperimentali sono:
+File sperimentali:
 
 - `ascii/presets/experimental/ASCII_M8_2_GlyphLibrary.blend`
 - `ascii/presets/experimental/ASCII_M8_2_Decoupled.blend`
@@ -29,7 +30,7 @@ esattamente senza perdere le celle esterne.
 
 ## 2. FFV1 index movie backend
 
-Il percorso sperimentale non usa più script esterni:
+Il percorso sperimentale non dipende più da script esterni:
 
 - `spatial.encode_index_movie()` produce un FFV1 RGB24 lossless dalla sequenza indice;
 - `spatial.validate_index_movie()` decodifica il movie e confronta **ogni pixel** con
@@ -39,9 +40,6 @@ Il percorso sperimentale non usa più script esterni:
 - `blender_job.py` carica il movie con colorspace `Non-Color`; il movie segue il frame
   della scena senza il link `Scene Time` che provocava il crash Blender 5.3;
 - il job verifica i percorsi dei movie e la coerenza delle mappe.
-
-Il campo `link_index_time` resta disponibile per la modalità sequenza, ma il nuovo
-renderer usa il movie.
 
 Verifiche (`_discovery/milestone8_2/backend_checks.json`):
 
@@ -79,8 +77,24 @@ Sei scene, clip da 4 s, tutte sul backend Blender corretto:
 - Adaptive Highlight Compression (`glyph-library` / `compress`);
 - Decoupled (`glyph-library-decoupled` / `compress`).
 
-Artefatti: `_discovery/milestone8_2/compare/` (clip, still 1920×1080/1080×1920,
-sheet). Conservative resta una variante sperimentale, non un default.
+Conservative/`adaptive-conservative`/`guarded` restano selezionabili come varianti
+sperimentali, ma non sono nelle clip principali.
+
+Artefatti: `_discovery/milestone8_2/compare/` (clip, still 1920×1080/1080×1920, sheet,
+crop 1:1 `crop_<scena>.png`).
+
+| Scena | Adaptive | Highlight | Decoupled |
+|---|---|---|---|
+| NieR | molto denso, @ bianchi | riduce il clipping, più +/H | più colore/tono, meno clipping |
+| villaggio | denso e leggibile | più aperto | colore e dettaglio, un po' più morbido |
+| foresta | buona struttura | più edge | colore/ombre migliori |
+| scuro | quasi vuoto | recupera dettaglio | recupera dettaglio e colore |
+| Balatro | carte/UI più leggibili | più aperto, UI più debole | più colore, UI meno densa |
+| bird/rain | bianco, sparse | edge più marcati | colore/UI migliori |
+
+La valutazione è visiva: le clip sono in `compare/<scena>_<modalità>.mp4` e i crop a
+piena risoluzione in `compare/crop_<scena>.png`. Non vengono usati score al posto del
+giudizio.
 
 ## 5. Direzione prodotto
 
@@ -108,7 +122,7 @@ del gioco. Il titolo appare solo nell'overlay del reveal.
 - round 1 Balatro: adattivo, tre indizi + reveal;
 - round 2 The Witcher 3: decoupled+compress, primo piano di Geralt;
 - round 3 NieR:Automata: highlight compression, HUD/explosione;
-- numero `1./2./3.`, titolo al reveal, musica 120 BPM e tagli 2/2/2/3;
+- numero `1./2./3.`, titolo solo al reveal, musica 120 BPM e tagli 2/2/2/3;
 - montaggio unico senza immagini sorgente o metriche affiancate.
 
 Frame di controllo: `_discovery/milestone8_2/rounds/three_rounds_frames.png`.
@@ -120,8 +134,10 @@ Frame di controllo: `_discovery/milestone8_2/rounds/three_rounds_frames.png`.
 - Il renderer libreria è sperimentale e non è il default.
 - Il gate sintetico usava camera ortografica; il preset M8.2 usa ortografia anche in
   produzione, con bordo pieno.
-- Gli still EEVEE possono avere jitter TAA; i video/segmenti sono deterministici.
+- Still, segmenti e ripresa sono deterministici nelle verifiche M8.2.
 - La scelta delle modalità nei tre round è manuale; Auto non è un prerequisito.
+- Gli indizi NieR sono volutamente scuri/sparsi; la modalità highlight è stata scelta
+  per non perdere l'esplosione del reveal.
 
 Prossimi passi: valutazione visiva dei tre round e del confronto a sei scene; solo dopo
 eventuale promozione del renderer nella GUI e ripresa di Auto.
