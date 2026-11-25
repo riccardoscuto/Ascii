@@ -137,8 +137,9 @@ def extract_analysis(project) -> Path:
     if out.exists():
         shutil.rmtree(out)
     out.mkdir(parents=True, exist_ok=True)
+    aw, ah = (180, 320) if project.format == "vertical" else (320, 180)
     cmd = [ffmpeg_bin(), "-y", "-v", "error", "-i", str(working),
-           "-vf", "fps=10,scale=320:180", str(out / "f_%04d.png")]
+           "-vf", f"fps=10,scale={aw}:{ah}", str(out / "f_%04d.png")]
     proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
     if proc.returncode != 0:
         raise RuntimeError(f"Analisi frame fallita: {proc.stderr.strip()[-800:]}")

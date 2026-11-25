@@ -29,9 +29,10 @@ def _frames(folder: Path, cols: int = COLS, rows: int = ROWS):
         t = (idx - 1) / 10.0
         im = Image.open(path).convert("RGB")
         # Scene/flash detection stays perceptual; tone statistics are linear.
-        small = im.convert("L").resize((160, 90), Image.Resampling.BOX)
+        tw, th = (90, 160) if cols < rows else (160, 90)
+        small = im.convert("L").resize((tw, th), Image.Resampling.BOX)
         px = small.load()
-        vals = [px[x, y] / 255.0 for y in range(90) for x in range(160)]
+        vals = [px[x, y] / 255.0 for y in range(th) for x in range(tw)]
         hist = [0] * 32
         for v in vals:
             hist[min(31, int(v * 32))] += 1

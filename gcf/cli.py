@@ -296,12 +296,16 @@ def cmd_ascii_auto(args) -> None:
     evidence = Path(args.evidence) if args.evidence else project.path / "selector_evidence"
     plan = ascii_selector.select(project, evidence, _ascii_progress)
     choices = {row["shot"]: row["selected"] for row in plan["shots"]}
-    out = Path(args.out) if args.out else project.output_dir / "auto.mp4"
-    ascii_selector.render_plan(plan, project, choices, out, _ascii_progress)
     print("selection:", plan.get("selection_plan", ""))
     print("selector project:", plan.get("selector_project", ""))
-    print("auto video:", out)
     print("choices:", choices)
+    missing = [row["shot"] for row in plan["shots"] if row["selected"] == "none"]
+    if missing:
+        print("NO-CHOICE: shot non recuperabili", missing, "- nessun video Auto forzato")
+        return
+    out = Path(args.out) if args.out else project.output_dir / "auto.mp4"
+    ascii_selector.render_plan(plan, project, choices, out, _ascii_progress)
+    print("auto video:", out)
 
 
 def cmd_ascii_render(args) -> None:

@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import numpy as np
 from PIL import Image
 
-from gcf.ascii import correction, luma, preset, selector, spatial
+from gcf.ascii import correction, luma, perceptual, preset, selector, spatial
 from gcf.ascii import render as render_mod
 
 
@@ -82,13 +82,24 @@ class SpatialUnitTests(unittest.TestCase):
             self.assertLess(stats["shots"][0]["target"], 0.1)
 
     def test_selector_score_prefers_negative_space_and_rejects_blank(self):
-        base = {"structure": 0.8, "shadow": 0.8, "density": 0.9,
-                "empty": 0.3, "saturation": 1.0, "color": 0.8,
+        base = {"structure": 0.8, "edge_ssim": 0.8, "shadow": 0.8,
+                "highlight": 0.8, "uniform": 0.9, "color": 0.8, "ui": 0.8,
                 "render_mean": 20.0, "render_max": 200}
         good = selector._score(base, 0.02)
-        dense = selector._score({**base, "empty": 0.0, "density": 0.45}, 0.02)
+        dense = selector._score({**base, "uniform": 0.4}, 0.02)
         self.assertGreater(good, dense)
         self.assertEqual(selector._score({**base, "render_mean": 0.1}, 0.02), -1.0)
+
+    def test_perceptual_common_grid_and_metrics(self):
+        self.assertEqual(perceptual.common_grid("horizontal"), (64, 36))
+        self.assertEqual(perceptual.common_grid("vertical"), (36, 64))
+        source = Image.new("RGB", (1920, 1080), (180, 180, 180))
+        rendered = Image.new("RGB", (1920, 1080), (0, 0, 0))
+        m = perceptual.metrics(source, rendered, "horizontal", 0.31)
+        for key in ("ssim", "edge_ssim", "edge_corr", "shadow", "highlight",
+                    "uniform", "color", "ui", "coverage"):
+            self.assertIn(key, m)
+            self.assertTrue(0.0 <= m[key] <= 1.0)
 
     def test_selector_vertical_resolution(self):
         self.assertEqual(selector._resolution("horizontal"), (1920, 1080))

@@ -1,8 +1,11 @@
-# Auto ASCII Selector — architettura proposta
+# Auto ASCII Selector — architettura e prototipo
 
-Stato: **prototipo offline implementato e verificato sul composito 14 s**.
-Non è collegato alla GUI e non è una modalità di default; `ascii_mode="auto"` nel renderer
-diretto resta rifiutata. La decisione automatica vive in `gcf/ascii/selector.py`.
+Stato: **motore unificato, non approvato per la GUI**.
+M7.2 ha unificato select() su evaluate_shot(), rimosso il vecchio rescore, aggiunto
+la rappresentazione comune e le metriche percettive, e valutato entrambe le palette per
+ogni modalità. Sul riesame dei sei errori: 2 corretti, 4 ancora regressivi (NieR esplosione,
+Balatro 0/1/2). Target 90% non raggiunto. scii_mode=auto nel renderer diretto resta
+rifiutata; la decisione vive in gcf/ascii/selector.py.
 
 ## Obiettivo
 

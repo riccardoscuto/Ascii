@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from gcf.ascii import luma, media, preset, render, spatial, tone
+from gcf.ascii import luma, media, perceptual, preset, render, spatial, tone
 from gcf.ascii.project import AsciiProject
 from gcf.config import ffmpeg_bin
 
@@ -112,61 +112,24 @@ def _pearson(a: np.ndarray, b: np.ndarray) -> float:
 def _candidate_metrics(project, candidate, client_project, source: Image.Image,
                        frame: int, still_path: str | Path | None = None) -> dict:
     data = preset.resolve(candidate)
-    grid = (data["grid"]["cols"], data["grid"]["rows"])
     ren = Image.open(still_path or _still_path(candidate)).convert("RGB")
-    cells, edge, lit, rgb, rgb_render = _cell_arrays(source, ren, grid)
-    structure = _pearson(edge, lit)
-    edge_threshold = float(np.percentile(edge, 70))
-    dark = (cells < data["shadow"]) & (edge >= edge_threshold)
-    shadow = float(np.mean(lit[dark] > 0.005)) if np.any(dark) else 0.0
-    empty = float(np.mean(lit < 0.005))
-    blocks = []
-    for by in range(6):
-        for bx in range(8):
-            y0, y1 = by * grid[1] // 6, (by + 1) * grid[1] // 6
-            x0, x1 = bx * grid[0] // 8, (bx + 1) * grid[0] // 8
-            blocks.append(float(np.mean(lit[y0:y1, x0:x1] > 0.005)))
-    occupied = sum(blocks)
-    entropy = 0.0
-    if occupied and len(blocks) > 1:
-        for value in blocks:
-            if value > 0:
-                p = value / occupied
-                entropy -= p * math.log(p)
-        entropy /= math.log(len(blocks))
-    if candidate.ascii_mode == "spatial" and candidate.spatial:
-        index_path = Path(candidate.spatial["dir"]) / "idx" / f"i_{frame:04d}.png"
-        if index_path.exists():
-            idx = np.asarray(Image.open(index_path).convert("L"), dtype=np.float32) / 32.0
-        else:
-            idx = np.rint(lit * 8.0)
-    else:
-        idx = np.rint(lit * 8.0)
-    high = float(np.mean(idx >= 7))
-    saturation = max(0.0, 1.0 - max(0.0, high - 0.45))
-    visible = lit > 0.08
-    color_error = (float(np.mean(np.abs(rgb[visible] - rgb_render[visible])))
-                   if np.any(visible) else 1.0)
-    color = max(0.0, 1.0 - min(1.0, color_error * 2.5))
-    density = entropy * (0.45 if (empty < 0.10 or empty > 0.85) else 1.0)
-    mean = float(np.mean(np.asarray(ren.convert("L"), dtype=np.float32)) / 255.0)
-    max_pixel = int(np.asarray(ren.convert("L")).max())
-    return {"structure": round(structure, 4), "shadow": round(shadow, 4),
-            "density": round(density, 4), "empty": round(empty, 4),
-            "saturation": round(saturation, 4), "color": round(color, 4),
-            "render_mean": round(mean * 255, 2), "render_max": max_pixel,
-            "lit": lit}
+    m = perceptual.metrics(source, ren, candidate.format, data["shadow"])
+    lum = ren.convert("L")
+    hist = lum.histogram()
+    mean = sum(k * c for k, c in enumerate(hist)) / (lum.width * lum.height)
+    max_pixel = max(i for i, c in enumerate(hist) if c)
+    m.update({"render_mean": round(mean, 2), "render_max": max_pixel})
+    return m
 
 
 def _score(metrics: dict, temporal: float) -> float:
-    if metrics["render_max"] < 8 or metrics["render_mean"] < 0.75:
-        return -1.0
-    if metrics["empty"] > 0.95:
+    if metrics.get("render_max", 0) < 8 or metrics.get("render_mean", 0) < 0.75:
         return -1.0
     temporal_score = max(0.0, 1.0 - min(1.0, temporal * 5.0))
-    return (0.35 * metrics["structure"] + 0.15 * metrics["shadow"]
-            + 0.20 * metrics["density"] + 0.05 * metrics["saturation"]
-            + 0.05 * metrics["color"] + 0.10 * temporal_score)
+    return (0.30 * metrics["structure"] + 0.10 * metrics["edge_ssim"]
+            + 0.15 * metrics["shadow"] + 0.10 * metrics["highlight"]
+            + 0.15 * metrics["uniform"] + 0.05 * metrics["color"]
+            + 0.10 * metrics["ui"] + 0.05 * temporal_score)
 
 
 def _source_window(source: str, fmt: str, t: float, count: int, prefix: Path) -> list[Path]:
@@ -196,6 +159,7 @@ def _windows_for(candidate, source: str, fmt: str, start: float, duration: float
                  evidence: Path, tag: str, cols: int, rows: int) -> dict:
     metrics = []
     invalid = []
+    window_errors = []
     excess = []
     samples = []
     for w, rel in enumerate((0.15, 0.45, 0.75)):
@@ -206,6 +170,8 @@ def _windows_for(candidate, source: str, fmt: str, start: float, duration: float
         srcs = _source_window(source, fmt, start + (first - 1) / 30.0, 3,
                               evidence / f"{tag}_src_w{w}")
         n = min(len(frames), len(srcs))
+        if len(frames) != 3 or len(srcs) != 3:
+            window_errors.append({"window": w, "frames": len(frames), "source_frames": len(srcs)})
         for f in frames[:n]:
             im = Image.open(f).convert("L")
             h = im.histogram()
@@ -214,6 +180,7 @@ def _windows_for(candidate, source: str, fmt: str, start: float, duration: float
             if mean < 0.75 or hi < 8:
                 invalid.append((w, f.name, round(mean, 2), hi))
         if n < 2:
+            window_errors.append({"window": w, "reason": "incomplete"})
             continue
         mid = n // 2
         src = Image.open(srcs[mid]).convert("RGB")
@@ -225,28 +192,39 @@ def _windows_for(candidate, source: str, fmt: str, start: float, duration: float
         lits = [_lit_cells(f, cols, rows) for f in frames[:n]]
         src_cells = [luma.linear_cells(Image.open(s).convert("RGB"), cols, rows)
                      for s in srcs[:n]]
-        idxs = [_index_cells(candidate, first + i, lits[i]) for i in range(n)]
         for i in range(1, n):
             sd = float(np.mean(np.abs(src_cells[i] - src_cells[i - 1])))
-            cd = float(np.mean(np.abs(idxs[i] - idxs[i - 1])))
+            cd = float(np.mean(np.abs(lits[i] - lits[i - 1]))) * 8.0
             excess.append(max(0.0, cd - sd * 8.0 * 1.5))
     avg = {}
-    for key in ("structure", "shadow", "density", "empty", "saturation", "color",
+    for key in ("structure", "edge_ssim", "shadow", "highlight", "uniform",
+                "color", "ui", "coverage", "ssim", "edge_corr", "contrast",
                 "render_mean", "render_max"):
         vals = [m[key] for m in metrics if key in m]
         avg[key] = round(float(np.mean(vals)), 4) if vals else 0.0
     temporal = float(np.mean(excess)) if excess else 1.0
     score = -1.0 if invalid or avg.get("render_max", 0) < 8 else _score(avg, min(0.2, temporal))
     return {"metrics": avg, "temporal_excess": round(temporal, 4),
-            "invalid_frames": invalid, "score": round(score, 4),
-            "frames": len(metrics), "samples": samples}
+            "invalid_frames": invalid, "window_errors": window_errors,
+            "score": round(score, 4), "frames": len(metrics), "samples": samples}
 
 
 def evaluate_shot(source: str, fmt: str, start: float, duration: float,
                   evidence_dir: Path, tag: str, windows: int = 3,
-                  compare_color: bool = True) -> dict:
+                  compare_color: bool = True, base_params: dict | None = None,
+                  already_working: bool = False) -> dict:
     """Evaluate Legacy/Spatial/Conservative on representative consecutive windows."""
     evidence_dir.mkdir(parents=True, exist_ok=True)
+    original_source = source
+    base_params = {**(base_params or {}), "gamma": (base_params or {}).get("gamma", 0.82),
+                   "shadow": (base_params or {}).get("shadow", 0.31),
+                   "contrast_high": (base_params or {}).get("contrast_high", 0.85)}
+    if not already_working:
+        probe = AsciiProject.create(source, fmt, start, duration, base_params,
+                                    title=f"M72 probe {tag}", ascii_mode="legacy")
+        media.prepare_working(probe)
+        source = probe.working_source
+        start = 0.0
     grid = preset.grid_for(fmt, 81)
     mid = _source_frame(source, start + duration / 2, evidence_dir / f"{tag}_char.png", fmt)
     cells = luma.linear_cells(mid, grid["cols"], grid["rows"]).ravel()
@@ -255,20 +233,25 @@ def evaluate_shot(source: str, fmt: str, start: float, duration: float,
     character = {"p50": round(p50m, 4), "sat": round(satm, 3),
                  "color_mode": 0.0 if satm > 0.18 and p50m > 0.015 else 1.0}
     character["auto_correction"] = bool(character["color_mode"] == 1.0 and p50m < 0.03)
-    base_params = {"gamma": 0.82, "shadow": 0.31, "contrast_high": 0.85}
     candidates = {}
     for name, spec in CANDIDATES.items():
-        params = {**base_params, "density": spec["density"],
-                  "color_mode": character["color_mode"],
-                  "auto_correction": character["auto_correction"]}
-        cand = AsciiProject.create(source, fmt, start, duration, params,
-                                   title=f"M71 {tag} {name}", ascii_mode=spec["mode"],
-                                   spatial_variant=spec["variant"])
-        result = _windows_for(cand, source, fmt, start, duration, evidence_dir,
-                              f"{tag}_{name}", grid["cols"], grid["rows"])
-        candidates[name] = {"project": str(cand.path), "mode": spec["mode"],
-                            "variant": spec["variant"], "density": spec["density"],
-                            "color_mode": character["color_mode"], **result}
+        variants = {}
+        for color in (character["color_mode"], 1.0 - character["color_mode"]):
+            params = {**base_params, "density": spec["density"],
+                      "color_mode": color,
+                      "auto_correction": bool(p50m < 0.03)}
+            cand = AsciiProject.create(source, fmt, start, duration, params,
+                                       title=f"M72 {tag} {name} c{int(color)}",
+                                       ascii_mode=spec["mode"], spatial_variant=spec["variant"])
+            cgrid = perceptual.common_grid(fmt)
+            result = _windows_for(cand, source, fmt, start, duration, evidence_dir,
+                                  f"{tag}_{name}_c{int(color)}", cgrid[0], cgrid[1])
+            variants[color] = {"project": str(cand.path), "mode": spec["mode"],
+                               "variant": spec["variant"], "density": spec["density"],
+                               "color_mode": color, **result}
+        best_color = max(variants, key=lambda c: variants[c]["score"])
+        candidates[name] = variants[best_color]
+        candidates[name]["color_variants"] = {str(int(c)): variants[c]["score"] for c in variants}
     ordered = sorted(candidates.items(), key=lambda kv: kv[1]["score"], reverse=True)
     chosen = ordered[0][0]
     reason = "highest score"
@@ -283,28 +266,11 @@ def evaluate_shot(source: str, fmt: str, start: float, duration: float,
     if unreadable:
         chosen = "none"
         reason = "no acceptable candidate"
-    color_alt = None
-    if compare_color and chosen != "none":
-        spec = CANDIDATES[chosen]
-        alt_color = 1.0 - character["color_mode"]
-        params = {**base_params, "density": spec["density"], "color_mode": alt_color,
-                  "auto_correction": bool(alt_color == 1.0 and p50m < 0.03)}
-        alt = AsciiProject.create(source, fmt, start, duration, params,
-                                  title=f"M71 {tag} {chosen} altcolor",
-                                  ascii_mode=spec["mode"], spatial_variant=spec["variant"])
-        alt_result = _windows_for(alt, source, fmt, start, duration, evidence_dir,
-                                  f"{tag}_{chosen}_alt", grid["cols"], grid["rows"])
-        color_alt = {"project": str(alt.path), "color_mode": alt_color, **alt_result}
-        if alt_result["score"] > candidates[chosen]["score"] + 0.010:
-            keep_project = str(alt.path)
-            candidates[chosen].update(alt_result)
-            candidates[chosen]["project"] = keep_project
-            candidates[chosen]["color_mode"] = alt_color
-            reason += "; alternate color wins visual-render score"
-    return {"tag": tag, "source": source, "format": fmt, "start": start,
-            "end": start + duration, "duration": duration, "character": character,
-            "candidates": candidates, "color_alt": color_alt,
-            "selected": chosen, "reason": reason, "unreadable": unreadable}
+    return {"tag": tag, "source": original_source, "working_source": source,
+            "format": fmt, "start": start, "end": start + duration,
+            "duration": duration, "character": character,
+            "candidates": candidates, "selected": chosen, "reason": reason,
+            "unreadable": unreadable}
 
 
 def select(project, evidence_dir: Path, progress=None) -> dict:
@@ -318,81 +284,29 @@ def select(project, evidence_dir: Path, progress=None) -> dict:
     shadow.params["density"] = 81
     shadow.save()
     data = preset.resolve(shadow)
+    grid = preset.grid_for(shadow.format, 81)
     plan = tone.build_plan(shadow, shadow.working_info["fps"], data["shadow"], data["white"],
                            auto=bool(project.params.get("auto_correction", False)),
                            overrides=project.params.get("correction_overrides"),
-                           analysis_grid=(144, 81), ramp=data["ramp"])
+                           analysis_grid=(grid["cols"], grid["rows"]), ramp=data["ramp"])
     shots = _shots(plan)
     base_params = {k: v for k, v in project.params.items()
                    if k in ("gamma", "shadow", "contrast_high", "local_contrast",
                             "contrast_low", "auto_correction")}
     rows = []
     for si, (start, end) in enumerate(shots):
-        duration = end - start
-        character = _shot_character(shadow, start, end)
-        candidates = {}
-        for name, spec in CANDIDATES.items():
-            params = {**base_params, "density": spec["density"],
-                      "color_mode": character["color_mode"],
-                      "auto_correction": character["auto_correction"]}
-            cand = AsciiProject.create(
-                project.source, project.format, project.interval_start + start, duration,
-                params, title=f"M7 {project.id} s{si} {name}",
-                ascii_mode=spec["mode"], spatial_variant=spec["variant"])
-            first_t = max(0.15, duration * 0.25)
-            second_t = max(first_t + 0.1, duration * 0.65)
-            stills = []
-            metrics = []
-            for k, at in enumerate((first_t, second_t)):
-                try:
-                    path = render.still(cand, at)
-                    copy = evidence_dir / f"s{si}_{name}_{k}.png"
-                    shutil.copy2(path, copy)
-                    stills.append(str(copy))
-                    frame = max(1, min(int(round(at * 30)) + 1,
-                                       int(round(cand.working_info["duration"] * 30))))
-                    src = _source_frame(project.source, project.interval_start + start + at,
-                                        evidence_dir / f"src_s{si}_{k}.png", project.format)
-                    metrics.append(_candidate_metrics(project, cand, project, src, frame))
-                except Exception as exc:
-                    stills.append("")
-                    metrics.append({"error": str(exc), "lit": None})
-            if metrics and "lit" in metrics[0]:
-                temporal = float(np.mean(np.abs(metrics[0]["lit"] - metrics[1]["lit"]))) \
-                    if len(metrics) > 1 and metrics[1].get("lit") is not None else 1.0
-            else:
-                temporal = 1.0
-            avg = {}
-            for key in ("structure", "shadow", "density", "empty", "saturation", "color",
-                        "render_mean", "render_max"):
-                vals = [m[key] for m in metrics if key in m]
-                avg[key] = round(float(np.mean(vals)), 4) if vals else 0.0
-            score = _score(avg, temporal) if avg.get("render_max", 0) >= 8 else -1.0
-            candidates[name] = {
-                "project": str(cand.path), "mode": spec["mode"], "variant": spec["variant"],
-                "density": spec["density"], "stills": stills, "metrics": avg,
-                "temporal": round(temporal, 4), "score": round(score, 4),
-                "error": next((m.get("error") for m in metrics if m.get("error")), ""),
-            }
-            if progress:
-                progress(si + 1, len(shots), name, score)
-        ordered = sorted(candidates.items(), key=lambda kv: kv[1]["score"], reverse=True)
-        chosen = ordered[0][0]
-        reason = "highest score"
-        if candidates["legacy"]["score"] >= ordered[0][1]["score"] - 0.010:
-            chosen = "legacy"
-            reason = "baseline within margin"
-        elif len(ordered) > 1 and ordered[0][1]["score"] - ordered[1][1]["score"] < 0.008:
-            stable = min((ordered[0], ordered[1]), key=lambda kv: kv[1]["temporal"])
-            chosen = stable[0]
-            reason = "close scores, lower temporal delta"
-        rows.append({
-            "shot": si, "start": round(start, 3), "end": round(end, 3),
-            "duration": round(duration, 3), "character": character,
-            "candidates": candidates, "selected": chosen, "reason": reason,
-        })
+        row = evaluate_shot(shadow.working_source, shadow.format, start, end - start,
+                            evidence_dir, f"{shadow.id}_s{si}", compare_color=True,
+                            base_params=base_params, already_working=True)
+        row.update({"shot": si, "start": round(start, 3), "end": round(end, 3),
+                    "duration": round(end - start, 3)})
+        rows.append(row)
+        if progress:
+            score = row["candidates"].get(row["selected"], {}).get("score", -1)
+            progress(si + 1, len(shots), 0, 0, f"Shot {si + 1} · {row['selected']} · {score}")
     selection = {
-        "version": 1,
+        "version": 2,
+        "engine": "unified-m72",
         "mode": "auto",
         "source": project.source,
         "source_sha1": spatial._sha1(Path(shadow.working_source)),
@@ -408,57 +322,6 @@ def select(project, evidence_dir: Path, progress=None) -> dict:
     shadow.ascii_mode = "auto"
     shadow.save()
     selection["selection_plan"] = str(plan_path)
-    return selection
-
-
-def rescore(selection: dict, project, evidence_dir: Path) -> dict:
-    """Recompute metrics/scores from the saved candidate stills."""
-    for row in selection["shots"]:
-        si = row["shot"]
-        duration = row["duration"]
-        first = max(0.15, duration * 0.25)
-        ats = (first, max(first + 0.1, duration * 0.65))
-        for name, candidate in row["candidates"].items():
-            cand = AsciiProject.load(Path(candidate["project"]))
-            metrics = []
-            for k, at in enumerate(ats):
-                still = candidate["stills"][k] if k < len(candidate["stills"]) else ""
-                src_path = evidence_dir / f"src_s{si}_{k}.png"
-                if not still or not src_path.exists():
-                    metrics.append({"error": "still/source missing", "lit": None})
-                    continue
-                frame = max(1, min(int(round(at * 30)) + 1,
-                                   int(round(cand.working_info["duration"] * 30))))
-                metrics.append(_candidate_metrics(project, cand, project,
-                                                  Image.open(src_path).convert("RGB"),
-                                                  frame, still))
-            if metrics and "lit" in metrics[0]:
-                temporal = (float(np.mean(np.abs(metrics[0]["lit"] - metrics[1]["lit"])))
-                            if len(metrics) > 1 and metrics[1].get("lit") is not None else 1.0)
-            else:
-                temporal = 1.0
-            avg = {}
-            for key in ("structure", "shadow", "density", "empty", "saturation",
-                        "color", "render_mean", "render_max"):
-                vals = [m[key] for m in metrics if key in m]
-                avg[key] = round(float(np.mean(vals)), 4) if vals else 0.0
-            candidate["metrics"] = avg
-            candidate["temporal"] = round(temporal, 4)
-            candidate["score"] = round(_score(avg, temporal) if avg.get("render_max", 0) >= 8 else -1.0, 4)
-        ordered = sorted(row["candidates"].items(), key=lambda kv: kv[1]["score"], reverse=True)
-        chosen = ordered[0][0]
-        reason = "highest score"
-        if row["candidates"]["legacy"]["score"] >= ordered[0][1]["score"] - 0.010:
-            chosen = "legacy"
-            reason = "baseline within margin"
-        elif len(ordered) > 1 and ordered[0][1]["score"] - ordered[1][1]["score"] < 0.008:
-            stable = min((ordered[0], ordered[1]), key=lambda kv: kv[1]["temporal"])
-            chosen = stable[0]
-            reason = "close scores, lower temporal delta"
-        row["selected"] = chosen
-        row["reason"] = reason
-    path = Path(project.selection_plan)
-    path.write_text(json.dumps(selection, indent=2), encoding="utf-8")
     return selection
 
 
@@ -478,16 +341,21 @@ def render_plan(selection: dict, project, choices: dict[int, str], out: Path,
     files = []
     for row in selection["shots"]:
         key = choices.get(row["shot"], row["selected"])
+        if key == "none":
+            raise RuntimeError(f"Shot {row['shot']} non recuperabile: nessun candidato valido.")
         if key not in row["candidates"]:
             raise ValueError(f"Candidato non valido per shot {row['shot']}: {key}")
         files.append(_render_shot(row, key, shot_dir))
         if progress:
-            progress(row["shot"] + 1, len(selection["shots"]), key, row["candidates"][key]["score"])
+            progress(row["shot"] + 1, len(selection["shots"]), 0, 0,
+                     f"Shot {row['shot'] + 1} · {key}")
     lst = out.parent / "concat.txt"
     lst.write_text("".join(f"file '{p.as_posix()}'\n" for p in files), encoding="utf-8")
     audio = False
     for row in selection["shots"]:
         key = choices.get(row["shot"], row["selected"])
+        if key == "none":
+            continue
         info = json.loads((Path(row["candidates"][key]["project"]) / "project.json").read_text())
         if (info.get("working_info") or {}).get("has_audio"):
             audio = True

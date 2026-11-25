@@ -517,3 +517,12 @@ Verificare copertina, numero, reveal e transizione su `_discovery/graphics_test_
 - Fallimenti principali: Balatro/UI, esplosione NieR, montagna, foresta fade. Auto non approvato per la GUI.
 - Transizione 3.1 s senza salti artificiali; cache corrotta, stop/ripresa reale e piani Legacy verificati.
 - Dettagli: docs/ASCII_MILESTONE7_1.md.
+
+## Milestone 7.2 — Unificazione e metriche percettive (2026-11-25)
+
+- select() unificato su evaluate_shot(); rimosso il vecchio rescore a due still. No-choice e CLI verificati.
+- Rappresentazione comune 64x36/36x64, SSIM multiscala, edge, ombre, highlights, densita uniforme, colore glifi e UI.
+- Diagnosis sei errori: density dominante; colore Legacy artificialmente 0; indice 8 saturo al 54,3% sull'esplosione.
+- Riesame nuovo motore: 2/6 corretti, 4/6 ancora errati. Target 90% non raggiunto; Auto non va in GUI.
+- Verticale/analysis 180x320, audio, cache, stop/ripresa e transizione 3.1 s verificati.
+- Dettagli: docs/ASCII_MILESTONE7_2.md.
