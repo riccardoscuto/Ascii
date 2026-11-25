@@ -1371,7 +1371,7 @@ class MainWindow(QMainWindow):
         game = self.project.current_game
         labels = {
             "missing": "Da registrare",
-            "recorded": "Da convertire",
+            "recorded": "Registrata",
             "dirty": "Da rigenerare",
             "converted": "Da approvare",
             "approved": "Approvata",

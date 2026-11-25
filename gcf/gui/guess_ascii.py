@@ -326,9 +326,9 @@ class AsciiClueDialog(QDialog):
         state = self.project.ascii_state(self.game, self.slot)
         labels = {
             "missing": "Mancante: registra o importa l'originale.",
-            "recorded": "Originale pronto, conversione ASCII mancante.",
+            "recorded": "Originale registrato; conversione ASCII mancante.",
             "dirty": "Parametri cambiati: rigenera la conversione ASCII.",
-            "converted": "Conversione pronta: controllala e approvala.",
+            "converted": "Conversione ASCII pronta: da approvare.",
             "approved": "Indizio ASCII approvato.",
         }
         data = self.game.clips[self.slot].ascii or {}
