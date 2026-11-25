@@ -74,8 +74,9 @@ Confronti a piena risoluzione in `_discovery/milestone8_1/ab/`:
 - **A** — Blender v2 approvato, mappe adattive;
 - **B** — Blender corretto, stesse mappe e parametri;
 - **C** — Blender corretto + Adaptive Highlight Compression (`compress`);
-- **D** — Blender corretto + Decoupled Reconstruction (mappe indice/colore/intensità
-  separate; prototipo reference e integrazione Blender validata su scena scura).
+- **D** — Blender corretto + Decoupled Reconstruction. Nella tabella delle sei scene
+  D è il renderer reference decoupled; l'integrazione Blender con mappe
+  indice/colore/intensità separate è validata separatamente su scena scura.
 
 Metriche principali (`structure / edge / highlight / UI / color / coverage`):
 
