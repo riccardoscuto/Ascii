@@ -53,8 +53,10 @@ as a direct renderer mode until the selector gate is approved. See
 `docs/ASCII_MILESTONE6.md`, `docs/ASCII_MILESTONE7.md` and
 `docs/ASCII_AUTO_SELECTOR.md`.
 
-The GUI still creates Legacy projects; use the CLI for Spatial until the GUI selector is
-approved and integrated.
+The GUI now exposes the Guess the Game in ASCII workflow: three ASCII clues plus the
+original reveal per game, per-clue preview/compare/approve, selective regeneration and
+montage. The standalone ASCII converter remains available as an advanced/diagnostic tool.
+See `docs/ASCII_MILESTONE9.md`.
 
 ## Documentation
 
@@ -66,4 +68,5 @@ in `docs/ASCII_MILESTONE7.md`, the independent M7.1 validation in
 `docs/ASCII_MILESTONE7_2.md`, the M8 renderer-quality gate in
 `docs/ASCII_MILESTONE8.md`, the M8.1 glyph-renderer gate in
 `docs/ASCII_MILESTONE8_1.md`, the M8.2 unified renderer/product prototype in
-`docs/ASCII_MILESTONE8_2.md`, and the selector design in `docs/ASCII_AUTO_SELECTOR.md`.
+`docs/ASCII_MILESTONE8_2.md`, the M9 integrated Guess workflow in
+`docs/ASCII_MILESTONE9.md`, and the selector design in `docs/ASCII_AUTO_SELECTOR.md`.

@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 from gcf.ascii import media, preset, spatial, tone
+from gcf.ascii import reference
 from gcf.ascii.preset import PRESET_BLEND
 from gcf.config import ROOT, blender_bin
 
@@ -84,6 +85,18 @@ def _signature(project, params: dict, plan: dict) -> str:
     mode = _mode(project)
     variant = _variant(project)
     maps = getattr(project, "spatial", {}) or {}
+    decoupled = getattr(project, "decoupled", {}) or {}
+    total = int(plan.get("total_frames", 0) or 0)
+    content = ""
+    if maps.get("dir") and total:
+        try:
+            content = spatial.map_content_hash(Path(maps["dir"]), total)
+        except Exception:
+            content = ""
+    movies = {}
+    for key, value in decoupled.items():
+        if key.endswith("movie") and value and Path(value).exists():
+            movies[key] = _file_sha1(value)
     payload = {
         "source_path": project.source,
         "source_sha1": _file_sha1(project.working_source),
@@ -105,10 +118,10 @@ def _signature(project, params: dict, plan: dict) -> str:
         "variant": variant,
         "map_key": maps.get("key"),
         "map_root": maps.get("index_root"),
+        "map_content": content,
         "renderer_version": preset.renderer_version(project),
-        "decoupled": {k: [str(v), Path(v).stat().st_size if Path(v).exists() else 0]
-                      for k, v in (getattr(project, "decoupled", {}) or {}).items()
-                      if k.endswith("movie")},
+        "decoupled_key": decoupled.get("map_key"),
+        "decoupled_movies": movies,
     }
     return hashlib.sha1(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
 
@@ -230,7 +243,7 @@ def _job_payload(project, data: dict, plan: dict, mode: str, total: int,
         "start_frame": start_frame,
         "end_frame": int(end_frame if end_frame is not None else total),
         "index_required": int(index_required if index_required is not None else total),
-        "skip_frame_checks": preset.renderer(project) != "v2",
+        "skip_frame_checks": False,
     }
 
 
@@ -300,6 +313,35 @@ def _read_verification(project, path: Path, payload: dict | None = None) -> dict
     return data
 
 
+DECOUPLED_VERSION = "decoupled-2"
+
+
+def _decoupled_key(project, data: dict) -> str:
+    payload = {
+        "version": DECOUPLED_VERSION,
+        "map": str((getattr(project, "spatial", {}) or {}).get("key", "")),
+        "renderer": preset.renderer_version(project),
+        "cell_px": reference.cell_px_for(project),
+        "color_mode": data.get("color_mode"),
+        "palette": data.get("palette"),
+        "params": {k: v for k, v in project.params.items() if k != "youtube_mbps"},
+    }
+    return hashlib.sha1(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _validate_decoupled_cache(cached: dict, end: int) -> bool:
+    try:
+        idx = Path(cached["idx_dir"])
+        color = Path(cached["color_dir"])
+        intensity = Path(cached["intensity_dir"])
+        spatial.validate_png_movie(idx, "i_%04d.png", Path(cached["index_movie"]), end)
+        spatial.validate_png_movie(color, "c_%04d.png", Path(cached["color_movie"]), end, rgb=True)
+        spatial.validate_png_movie(intensity, "t_%04d.png", Path(cached["intensity_movie"]), end)
+        return True
+    except Exception:
+        return False
+
+
 def _ensure_maps(project, data: dict, plan: dict, end: int,
                  progress=None, cancel=None) -> dict | None:
     if _mode(project) == "legacy":
@@ -334,10 +376,16 @@ def _ensure_maps(project, data: dict, plan: dict, end: int,
             spatial.validate_index_movie(project, movie, end)
         project.spatial["index_movie"] = str(movie)
         if renderer == "glyph-library-decoupled":
-            key = str(project.spatial.get("key", ""))
+            dkey = _decoupled_key(project, data)
             cached = getattr(project, "decoupled", {}) or {}
-            if cached.get("map_key") != key or int(cached.get("frames", 0)) != end:
-                from gcf.ascii import reference
+            usable = (cached.get("map_key") == dkey
+                      and int(cached.get("frames", 0)) >= end
+                      and all(cached.get(k) and Path(cached[k]).exists() for k in
+                              ("idx_dir", "color_dir", "intensity_dir",
+                               "index_movie", "color_movie", "intensity_movie")))
+            if usable and _validate_decoupled_cache(cached, end):
+                project.decoupled = cached
+            else:
                 ddir = project.path / "temp" / "decoupled"
                 maps = reference.write_decoupled_maps(project, 1, end, ddir)
                 idx_movie = ddir / "index_movie.mkv"
@@ -350,15 +398,18 @@ def _ensure_maps(project, data: dict, plan: dict, end: int,
                 spatial.validate_png_movie(Path(maps["color"]), "c_%04d.png", color_movie, end, rgb=True)
                 spatial.validate_png_movie(Path(maps["intensity"]), "t_%04d.png", intensity_movie, end)
                 project.decoupled = {
-                    "map_key": key, "frames": end, "dir": str(ddir),
+                    "map_key": dkey, "frames": end, "dir": str(ddir),
                     "idx_dir": maps["idx"], "color_dir": maps["color"],
                     "intensity_dir": maps["intensity"],
                     "index_movie": str(idx_movie),
                     "color_movie": str(color_movie),
                     "intensity_movie": str(intensity_movie),
+                    "sha1": {
+                        "index": _file_sha1(idx_movie),
+                        "color": _file_sha1(color_movie),
+                        "intensity": _file_sha1(intensity_movie),
+                    },
                 }
-            else:
-                project.decoupled = cached
         else:
             project.decoupled = {}
     project.timings["maps"] = round(time.time() - started, 3)
@@ -371,6 +422,23 @@ def _maps_path(project) -> Path:
     if decoupled.get("dir") and "decoupled" in preset.renderer(project):
         return Path(decoupled["dir"])
     return Path(project.spatial["dir"])
+
+
+def signature(project, progress=None) -> str:
+    prepared = prepare(project, progress)
+    return _signature(project, prepared["params"]["sockets"], prepared["plan"])
+
+
+def ensure_render(project, progress=None, cancel=None) -> dict:
+    """Re-encode only when needed; an unchanged ASCII clip is left untouched."""
+    prepared = prepare(project, progress)
+    sig = _signature(project, prepared["params"]["sockets"], prepared["plan"])
+    if (project.render_key == sig and project.master_path.exists()
+            and project.youtube_path.exists()):
+        return project.outputs or {
+            "master": str(project.master_path), "youtube": str(project.youtube_path),
+        }
+    return render(project, progress, cancel)
 
 
 def render_window(project, start_frame: int, end_frame: int, out_dir: Path,

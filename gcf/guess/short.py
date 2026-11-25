@@ -90,11 +90,17 @@ def _round_fingerprint(
     game = project.games[game_index]
     clips = []
     for slot, clip in enumerate(game.clips):
-        path = project.clip_mp4(game, slot)
+        path = project.ascii_mp4(game, slot) if slot < 3 else project.clip_mp4(game, slot)
         clips.append({
             "slot": slot,
             "take_id": clip.take_id,
             "crop": clip.crop,
+            "kind": "ascii" if slot < 3 else "original",
+            "ascii": {
+                key: (clip.ascii or {}).get(key) for key in
+                ("fingerprint", "cache_signature", "renderer", "variant", "mode",
+                 "density", "color", "start", "duration", "status")
+            },
             "file": _media_stamp(path) if path else None,
         })
     return {
@@ -111,17 +117,28 @@ def _clip_rows(project: Project, game_index: int) -> list[dict]:
     game = project.games[game_index]
     rows = []
     for slot, entry in enumerate(game.clips):
-        path = project.clip_mp4(game, slot)
-        if not path:
-            raise InsufficientMaterial(
-                f"Manca {SLOT_LABELS[slot]} per {game.title}."
-            )
+        if slot < 3:
+            path = project.ascii_mp4(game, slot)
+            if not path:
+                raise InsufficientMaterial(
+                    f"Manca la conversione ASCII di {SLOT_LABELS[slot]} per {game.title}."
+                )
+            kind = "ascii"
+        else:
+            path = project.clip_mp4(game, slot)
+            if not path:
+                raise InsufficientMaterial(
+                    f"Manca {SLOT_LABELS[slot]} per {game.title}."
+                )
+            kind = "original"
         rows.append({
             "path": path,
             "slot": slot,
             "slot_key": SLOT_KEYS[slot],
             "take_id": entry.take_id,
             "crop": entry.crop,
+            "kind": kind,
+            "ascii": entry.ascii if kind == "ascii" else None,
         })
     return rows
 
@@ -172,6 +189,22 @@ def build_game_round(
     )
 
 
+def short_metadata(project: Project) -> dict:
+    challenge = project.challenge_title.strip().upper()
+    return {
+        "title": f"{challenge.title()} | 6 Games in 60 Seconds",
+        "description": (
+            f"{challenge.title()}. Six games, one minute. "
+            "Comment your score.\n\n"
+            "No spoilers: each game title appears only in its reveal."
+        ),
+        "hashtags": ["#gaming", "#videogames", "#guessthegame", "#shorts"],
+        "games_count": len(project.games),
+        "challenge_category": project.challenge_category,
+        "approval": "pending",
+    }
+
+
 def build_short(
     project_id: str,
     beatmap_path: Path | None = None,
@@ -184,12 +217,16 @@ def build_short(
 
     missing = []
     for game in project.games:
-        for slot, clip in enumerate(game.clips):
-            if not project.clip_mp4(game, slot):
-                missing.append(f"{game.title} — {SLOT_LABELS[slot]}")
+        for slot in range(3):
+            state = project.ascii_state(game, slot)
+            if state != "approved":
+                missing.append(f"{game.title} — {SLOT_LABELS[slot]} ({state})")
+        if not project.clip_mp4(game, 3):
+            missing.append(f"{game.title} — {SLOT_LABELS[3]}")
     if missing:
         raise InsufficientMaterial(
-            "Mancano clip obbligatorie:\n" + "\n".join(f"• {row}" for row in missing)
+            "Mancano clip ASCII approvate o reveal originali:\n"
+            + "\n".join(f"• {row}" for row in missing)
         )
 
     ensure_music(60.0)
@@ -258,19 +295,7 @@ def build_short(
     if abs(info["duration"] - SHORT_DURATION) > 0.1 or info["frames"] != int(SHORT_DURATION * FPS):
         raise RuntimeError(f"Output inatteso: {info}")
 
-    challenge = project.challenge_title.strip().upper()
-    metadata = {
-        "title": f"{challenge.title()} | 6 Games in 60 Seconds",
-        "description": (
-            f"{challenge.title()}. Six games, one minute. "
-            "Comment your score.\n\n"
-            + "\n".join(f"{i + 1}. {g.title}" for i, g in enumerate(project.games))
-        ),
-        "hashtags": ["#gaming", "#videogames", "#guessthegame", "#shorts"],
-        "games": [g.title for g in project.games],
-        "challenge_category": project.challenge_category,
-        "approval": "pending",
-    }
+    metadata = short_metadata(project)
     (outdir / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
 
     manifest = {
@@ -278,6 +303,7 @@ def build_short(
         "resolution": [W, H],
         "fps": FPS,
         "duration": SHORT_DURATION,
+        "frames": int(round(SHORT_DURATION * FPS)),
         "output": _rel(output),
         "sha256": {"output": sha256(output), "music": sha256(music)},
         "cover": {
@@ -314,4 +340,85 @@ def build_short(
         "font": _rel(font_file),
     }
     (outdir / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    return manifest
+
+
+def build_short_preview(
+    project_id: str,
+    games: int = 3,
+    beatmap_path: Path | None = None,
+    durations: tuple[float, ...] | None = None,
+    music_path: Path | None = None,
+) -> dict:
+    """Build an exact-frame montage of the first N approved rounds."""
+    project = Project.load(project_dir(project_id))
+    games = max(1, min(int(games), len(project.games)))
+    ensure_music(60.0)
+    music = Path(music_path).resolve() if music_path else MUSIC
+    beatmap_file = Path(beatmap_path).resolve() if beatmap_path else BEATMAP
+    timing = make_round_timing(load_beatmap(beatmap_file), durations or DEFAULT_CLIP_DURATIONS)
+    duration = round(timing.total * games, 3)
+    if media_duration(music) < duration:
+        raise InsufficientMaterial(f"Musica troppo corta: {media_duration(music):.1f}s per {duration:.1f}s.")
+    missing = [g.title for g in project.games[:games] if not project.ascii_ready_for_game(g)]
+    if missing:
+        raise InsufficientMaterial(
+            "Servono tre indizi ASCII approvati e il reveal per: " + ", ".join(missing)
+        )
+    work = project.path / "work" / "preview_rounds"
+    work.mkdir(parents=True, exist_ok=True)
+    manifests = [
+        build_game_round(
+            project, i, outdir=work / f"round_{i + 1}", timing=timing,
+            beatmap_path=beatmap_file, music_path=music,
+        )
+        for i in range(games)
+    ]
+    rounds = [work / f"round_{i + 1}" / "round_01.mp4" for i in range(games)]
+    filters = "".join(f"[{i}:v]setsar=1[v{i}];" for i in range(games))
+    filters += "".join(f"[v{i}]" for i in range(games))
+    filters += f"concat=n={games}:v=1:a=0[v]"
+    outdir = project.path / "output"
+    outdir.mkdir(parents=True, exist_ok=True)
+    output = outdir / "short_preview.mp4"
+    cmd = [ffmpeg_bin(), "-y", "-v", "error"]
+    for path in rounds:
+        cmd += ["-i", str(path)]
+    cmd += ["-i", str(music)]
+    cmd += [
+        "-filter_complex", filters, "-map", "[v]", "-map", f"{games}:a",
+        "-t", f"{duration}", "-r", str(FPS), *video_encode_args(18),
+        "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
+        "-ar", "48000", "-ac", "2", "-movflags", "+faststart", str(output),
+    ]
+    subprocess.run(cmd, check=True)
+    info = probe(output)
+    expected_frames = int(round(duration * FPS))
+    if info["frames"] != expected_frames or abs(info["duration"] - duration) > 0.1:
+        raise RuntimeError(f"Montaggio preview inatteso: {info}, attesi {expected_frames} frame.")
+    manifest = {
+        "project": project_id,
+        "games": games,
+        "duration": duration,
+        "frames": expected_frames,
+        "resolution": [W, H],
+        "fps": FPS,
+        "output": _rel(output),
+        "sha256": {"output": sha256(output), "music": sha256(music)},
+        "rounds": [
+            {"game": project.games[i].title, "round": i + 1,
+             "output": _rel(rounds[i]), "clips": manifests[i]["clips"]}
+            for i in range(games)
+        ],
+        "timing": {
+            "clip_durations": list(timing.clip_durations),
+            "reveal_at": timing.reveal_at,
+            "number_at": timing.number_at,
+        },
+        "music": _rel(music),
+        "beatmap": _rel(beatmap_file),
+    }
+    (outdir / "short_preview_manifest.json").write_text(
+        json.dumps(manifest, indent=2), encoding="utf-8"
+    )
     return manifest

@@ -19,6 +19,7 @@ from gcf.capture.obs import Obs
 from gcf.config import ROOT, project_dir
 from gcf.gui.ascii_video import AsciiVideoPage
 from gcf.gui.capture import GuiCaptureSession
+from gcf.gui.guess_ascii import AsciiClueDialog
 from gcf.gui.overlay import ACCENT, CaptureControlPanel, CropOverlay, exclude_from_capture
 from gcf.gui.project import CLIP_COUNT, CLIP_LABELS, Project, recent_projects
 from gcf.gui.windows import (
@@ -31,7 +32,7 @@ from gcf.gui.windows import (
 )
 from gcf.guess.cover import build_cover, render_cover_still
 from gcf.guess.round import load_preset
-from gcf.guess.short import build_game_round, build_short
+from gcf.guess.short import build_game_round, build_short, build_short_preview
 
 
 APP_STYLE = """
@@ -93,6 +94,23 @@ class ShortWorker(QThread):
             self.failed.emit(str(exc))
 
 
+class ShortPreviewWorker(QThread):
+    done = Signal(str, int)
+    failed = Signal(str)
+
+    def __init__(self, project_id: str, games: int = 3):
+        super().__init__()
+        self.project_id = project_id
+        self.games = games
+
+    def run(self):
+        try:
+            manifest = build_short_preview(self.project_id, games=self.games)
+            self.done.emit(str(ROOT / manifest["output"]), int(manifest["frames"]))
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 class WarmObsWorker(QThread):
     def run(self):
         try:
@@ -122,7 +140,7 @@ class RoundWorker(QThread):
             self.failed.emit(str(exc))
 
 
-COVER_CATEGORIES = ("Scenery", "HUD", "Menu", "Skybox", "Title Screen", "Personalizzato")
+COVER_CATEGORIES = ("ASCII", "Scenery", "HUD", "Menu", "Skybox", "Title Screen", "Personalizzato")
 
 
 def _pil_pixmap(image, size: QSize) -> QPixmap:
@@ -150,7 +168,7 @@ class CoverEditor(QWidget):
         form.setSpacing(5)
         form.addWidget(self._muted("Titolo challenge"))
         self.title_edit = QLineEdit()
-        self.title_edit.setPlaceholderText("GUESS THE GAME FROM ITS ...")
+        self.title_edit.setPlaceholderText("GUESS THE GAME IN ASCII")
         form.addWidget(self.title_edit)
         form.addWidget(self._muted("Categoria (opzionale)"))
         self.category = QComboBox()
@@ -200,8 +218,8 @@ class CoverEditor(QWidget):
             self.load_project(project)
         else:
             self._loading = True
-            self.title_edit.setText("GUESS THE GAME FROM ITS SCENERY")
-            self.category.setCurrentText("Scenery")
+            self.title_edit.setText("GUESS THE GAME IN ASCII")
+            self.category.setCurrentText("ASCII")
             self.duration.setValue(2.0)
             self._loading = False
             self.populate_backgrounds({"type": "auto"})
@@ -219,7 +237,8 @@ class CoverEditor(QWidget):
         self.populate_backgrounds(project.cover_background)
         self.title_edit.setText(project.challenge_title)
         category = project.challenge_category
-        expected = f"GUESS THE GAME FROM ITS {category.upper()}"
+        expected = ("GUESS THE GAME IN ASCII" if category == "ASCII"
+                    else f"GUESS THE GAME FROM ITS {category.upper()}")
         if category != "Personalizzato" and project.challenge_title.strip().upper() != expected:
             category = "Personalizzato"
         index = self.category.findText(category)
@@ -262,7 +281,10 @@ class CoverEditor(QWidget):
             return
         if category != "Personalizzato":
             self._loading = True
-            self.title_edit.setText(f"GUESS THE GAME FROM ITS {category.upper()}")
+            self.title_edit.setText(
+                "GUESS THE GAME IN ASCII" if category == "ASCII"
+                else f"GUESS THE GAME FROM ITS {category.upper()}"
+            )
             self._loading = False
         self.schedule_preview()
 
@@ -816,6 +838,7 @@ class MainWindow(QMainWindow):
         self._preparing = False
         self.cover_recording = False
         self.short_worker: ShortWorker | None = None
+        self.short_preview_worker: ShortPreviewWorker | None = None
         self.round_worker: RoundWorker | None = None
         self.warm_worker: WarmObsWorker | None = None
         self.watch_timer = QTimer(self)
@@ -857,25 +880,28 @@ class MainWindow(QMainWindow):
         lay.setContentsMargins(56, 46, 56, 40)
         lay.setSpacing(16)
 
-        kicker = QLabel("GAMING CONTENT FACTORY")
+        kicker = QLabel("GUESS THE GAME IN ASCII")
         kicker.setObjectName("kicker")
-        title = QLabel("Nuovi Short, senza montaggio manuale.")
+        title = QLabel("Sei giochi. Tre indizi ASCII. Un reveal.")
         title.setObjectName("h1")
-        sub = QLabel("Sei giochi, una cornice verticale, una traccia fissa. Il resto lo fa il programma.")
+        sub = QLabel(
+            "Il percorso principale: registra le clip, converti i primi tre indizi, "
+            "approva e monta lo Short verticale."
+        )
         sub.setObjectName("muted")
         lay.addWidget(kicker)
         lay.addWidget(title)
         lay.addWidget(sub)
 
-        new_btn = QPushButton("Nuovo Short")
+        new_btn = QPushButton("Nuovo Short ASCII")
         new_btn.setObjectName("primary")
         new_btn.setFixedWidth(220)
         new_btn.clicked.connect(lambda: self.pages.setCurrentWidget(self.new_page))
         lay.addSpacing(10)
         home_row = QHBoxLayout()
         home_row.addWidget(new_btn)
-        ascii_btn = QPushButton("Nuovo Video ASCII")
-        ascii_btn.setObjectName("primary")
+        ascii_btn = QPushButton("Strumento ASCII")
+        ascii_btn.setObjectName("ghost")
         ascii_btn.setFixedWidth(220)
         ascii_btn.clicked.connect(self.open_ascii_page)
         home_row.addWidget(ascii_btn)
@@ -907,11 +933,14 @@ class MainWindow(QMainWindow):
         lay = QVBoxLayout(page)
         lay.setContentsMargins(56, 42, 56, 40)
         lay.setSpacing(14)
-        kicker = QLabel("NUOVO SHORT")
+        kicker = QLabel("NUOVO SHORT ASCII")
         kicker.setObjectName("kicker")
         title = QLabel("Inserisci i sei videogiochi")
         title.setObjectName("h1")
-        sub = QLabel("Verrà creato un progetto con sei posizioni. Potrai registrare i giochi uno alla volta.")
+        sub = QLabel(
+            "Ogni gioco avrà tre indizi ASCII e un reveal originale. "
+            "Potrai registrare o importare le clip una alla volta."
+        )
         sub.setObjectName("muted")
         lay.addWidget(kicker)
         lay.addWidget(title)
@@ -994,6 +1023,10 @@ class MainWindow(QMainWindow):
         self.graphics_btn.setObjectName("ghost")
         self.graphics_btn.clicked.connect(self.edit_graphics)
         top.addWidget(self.graphics_btn)
+        self.ascii_btn = QPushButton("Indizio ASCII")
+        self.ascii_btn.setObjectName("ghost")
+        self.ascii_btn.clicked.connect(self.edit_ascii_clue)
+        top.addWidget(self.ascii_btn)
         self.cover_btn = QPushButton("Copertina")
         self.cover_btn.setObjectName("ghost")
         self.cover_btn.clicked.connect(self.edit_cover)
@@ -1114,6 +1147,10 @@ class MainWindow(QMainWindow):
         self.round_btn.setObjectName("ghost")
         self.round_btn.setEnabled(False)
         self.round_btn.clicked.connect(self.preview_round)
+        self.rounds3_btn = QPushButton("Montaggio 3 round")
+        self.rounds3_btn.setObjectName("ghost")
+        self.rounds3_btn.setEnabled(False)
+        self.rounds3_btn.clicked.connect(self.build_three_rounds)
         self.generate_btn = QPushButton("Genera Short")
         self.generate_btn.setObjectName("primary")
         self.generate_btn.setEnabled(False)
@@ -1124,6 +1161,8 @@ class MainWindow(QMainWindow):
         nav.addWidget(self.prev_btn)
         nav.addStretch(1)
         nav.addWidget(self.round_btn)
+        nav.addSpacing(8)
+        nav.addWidget(self.rounds3_btn)
         nav.addSpacing(8)
         nav.addWidget(self.generate_btn)
         nav.addSpacing(10)
@@ -1137,8 +1176,14 @@ class MainWindow(QMainWindow):
         self.recent.clear()
         for p in recent_projects():
             count = p.completed_clips()
+            ascii_done = sum(
+                1 for g in p.games for slot in range(3)
+                if p.ascii_state(g, slot) == "approved"
+            )
             label = p.challenge_title.strip() or p.title
-            item = QListWidgetItem(f"{label}  ·  {count}/24 clip  ·  {p.id}")
+            item = QListWidgetItem(
+                f"{label}  ·  {count}/24 clip  ·  {ascii_done}/18 ASCII  ·  {p.id}"
+            )
             item.setData(Qt.UserRole, str(p.path))
             self.recent.addItem(item)
         if self.recent.count() and not self.recent.currentItem():
@@ -1151,7 +1196,7 @@ class MainWindow(QMainWindow):
         if item:
             try:
                 p = Project.load(Path(item.data(Qt.UserRole)))
-                enabled = p.all_recorded()
+                enabled = p.ascii_ready()
             except Exception:
                 enabled = False
         self.home_generate.setEnabled(enabled)
@@ -1166,9 +1211,11 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.critical(self, "Errore", str(exc))
             return
-        if not p.all_recorded():
-            QMessageBox.warning(self, "Registrazioni mancanti",
-                                "Completa le 24 clip (quattro per gioco) prima di generare lo Short.")
+        if not p.ascii_ready():
+            QMessageBox.warning(
+                self, "Indizi ASCII mancanti",
+                "Servono tre indizi ASCII approvati e un reveal originale per ogni gioco."
+            )
             return
         self.open_project(p)
         self.generate_short()
@@ -1260,8 +1307,16 @@ class MainWindow(QMainWindow):
             if verify.exists():
                 self._show_preview(verify)
         self.open_btn.setEnabled(bool(mp4))
-        self.generate_btn.setEnabled(self.project.all_recorded())
-        self.round_btn.setEnabled(self.project.game_complete(game))
+        self.ascii_btn.setEnabled(slot < 3 and bool(mp4))
+        self.ascii_btn.setText(
+            "Indizio ASCII" if slot < 3 else "Reveal originale"
+        )
+        self.generate_btn.setEnabled(self.project.ascii_ready())
+        self.round_btn.setEnabled(self.project.ascii_ready_for_game(game))
+        self.rounds3_btn.setEnabled(
+            len(self.project.games) >= 3
+            and all(self.project.ascii_ready_for_game(g) for g in self.project.games[:3])
+        )
         self.prev_btn.setEnabled(idx > 0 or slot > 0)
         self._update_next_controls()
         self.update_slot_cards()
@@ -1314,14 +1369,29 @@ class MainWindow(QMainWindow):
         if not self.project:
             return
         game = self.project.current_game
+        labels = {
+            "missing": "Da registrare",
+            "recorded": "Da convertire",
+            "dirty": "Da rigenerare",
+            "converted": "Da approvare",
+            "approved": "Approvata",
+            "original": "Pronta",
+        }
         for i, button in enumerate(self.slot_buttons):
             clip = game.clips[i]
             mp4 = self.project.clip_mp4(game, i)
-            state = "Pronta" if mp4 else ("Mancante" if clip.take_id else "Da registrare")
-            button.setText(f"{CLIP_LABELS[i]}\n{state}")
-            button.setToolTip(clip.take_id or "Nessuna clip")
+            state = self.project.ascii_state(game, i) if i < 3 else ("original" if mp4 else "missing")
+            button.setText(f"{CLIP_LABELS[i]}\n{labels.get(state, state)}")
+            button.setToolTip(
+                f"{clip.take_id or 'Nessuna clip'}\nASCII: {state}"
+            )
             icon = None
-            if mp4:
+            data = clip.ascii or {}
+            for candidate in (data.get("compare"), data.get("preview")):
+                if candidate and Path(candidate).exists() and str(candidate).lower().endswith(".png"):
+                    icon = candidate
+                    break
+            if mp4 and not icon:
                 for name in ("verify_vertical.png", "preview_vertical.png"):
                     candidate = mp4.parent / name
                     if candidate.exists():
@@ -1338,6 +1408,28 @@ class MainWindow(QMainWindow):
             return
         self.close_capture()
         self.project.set_clip_index(index)
+        self.load_game()
+
+    def edit_ascii_clue(self) -> None:
+        if not self.project:
+            return
+        self.close_capture()
+        game = self.project.current_game
+        slot = self.project.current_clip
+        if slot >= 3:
+            QMessageBox.information(
+                self, "Reveal originale",
+                "Il quarto slot resta la registrazione originale e non viene convertito.",
+            )
+            return
+        if not self.project.clip_mp4(game, slot):
+            QMessageBox.warning(
+                self, "Indizio ASCII",
+                f"Registra o importa prima {CLIP_LABELS[slot]} di {game.title}.",
+            )
+            return
+        dialog = AsciiClueDialog(self.project, game, slot, self)
+        dialog.exec()
         self.load_game()
 
     def edit_cover(self) -> None:
@@ -1379,11 +1471,17 @@ class MainWindow(QMainWindow):
         mp4 = self.project.clip_mp4(game, slot)
         if not mp4:
             return f"{CLIP_LABELS[slot]}: clip mancante."
+        ascii_state = self.project.ascii_state(game, slot) if slot < 3 else "originale"
+        data = clip.ascii or {}
+        ascii_line = f"\nASCII: {ascii_state}"
+        if data.get("output"):
+            ascii_line += f"\n{data['output']}"
         return (
             f"{CLIP_LABELS[slot]}\n"
             f"Take: {clip.take_id}\n"
             f"Stato: {clip.status}\n"
             f"Crop: {clip.crop}"
+            f"{ascii_line}"
         )
 
     def _overlay_frame(self, crop: dict, client: QRect, source_w: int, source_h: int) -> QRect:
@@ -1690,7 +1788,8 @@ class MainWindow(QMainWindow):
             self.generate_btn.setEnabled(self.project.all_recorded())
             QMessageBox.information(
                 self, "Registrazioni complete",
-                "Tutte le 24 clip sono pronte. Il prossimo passo è Genera Short.",
+                "Tutte le 24 clip originali sono pronte. Approva i 18 indizi ASCII, "
+                "poi Genera Short.",
             )
             self.pages.setCurrentWidget(self.home)
             self.refresh_recent()
@@ -1755,10 +1854,10 @@ class MainWindow(QMainWindow):
         if not self.project:
             return
         game = self.project.current_game
-        if not self.project.game_complete(game):
+        if not self.project.ascii_ready_for_game(game):
             QMessageBox.warning(
                 self, "Anteprima round",
-                f"Servono le quattro clip di {game.title} per generare il round.",
+                f"Servono tre indizi ASCII approvati e il reveal di {game.title}.",
             )
             return
         if self.round_worker and self.round_worker.isRunning():
@@ -1785,11 +1884,47 @@ class MainWindow(QMainWindow):
         self.start_hint.setText("Generazione del round non riuscita.")
         QMessageBox.critical(self, "Anteprima round", message)
 
+    def build_three_rounds(self) -> None:
+        if not self.project:
+            return
+        first = self.project.games[:3]
+        if not all(self.project.ascii_ready_for_game(g) for g in first):
+            QMessageBox.warning(
+                self, "Montaggio 3 round",
+                "Servono tre indizi ASCII approvati e il reveal per i primi tre giochi.",
+            )
+            return
+        if self.short_preview_worker and self.short_preview_worker.isRunning():
+            QMessageBox.information(self, "Montaggio 3 round", "Generazione già in corso.")
+            return
+        self.rounds3_btn.setEnabled(False)
+        self.start_hint.setText("Montaggio dei primi tre round in corso...")
+        self.short_preview_worker = ShortPreviewWorker(self.project.id, 3)
+        self.short_preview_worker.done.connect(self.on_short_preview_done)
+        self.short_preview_worker.failed.connect(self.on_short_preview_failed)
+        self.short_preview_worker.start()
+
+    def on_short_preview_done(self, path: str, frames: int) -> None:
+        self.rounds3_btn.setEnabled(True)
+        self.start_hint.setText(f"Montaggio 3 round generato ({frames} frame).")
+        QMessageBox.information(
+            self, "Montaggio 3 round", f"Video generato:\n{path}\n\nFrame: {frames}"
+        )
+        try:
+            os.startfile(path)
+        except Exception:
+            pass
+
+    def on_short_preview_failed(self, message: str) -> None:
+        self.rounds3_btn.setEnabled(True)
+        self.start_hint.setText("Montaggio 3 round non riuscito.")
+        QMessageBox.critical(self, "Montaggio 3 round", message)
+
     def generate_short(self) -> None:
-        if not self.project or not self.project.all_recorded():
+        if not self.project or not self.project.ascii_ready():
             QMessageBox.warning(
                 self, "Genera Short",
-                "Servono tutte le 24 clip (quattro per gioco) prima di generare lo Short.",
+                "Servono tre indizi ASCII approvati e il reveal originale per tutti i sei giochi.",
             )
             return
         if self.short_worker and self.short_worker.isRunning():
@@ -1826,6 +1961,8 @@ class MainWindow(QMainWindow):
         if self.ascii_page.worker and self.ascii_page.worker.isRunning():
             self.ascii_page.worker.cancel()
             self.ascii_page.worker.wait(12000)
+        if self.short_preview_worker and self.short_preview_worker.isRunning():
+            self.short_preview_worker.wait(12000)
         try:
             Obs().close_portable()
         except Exception:

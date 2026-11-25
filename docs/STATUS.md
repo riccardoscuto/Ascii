@@ -555,3 +555,15 @@ Verificare copertina, numero, reveal e transizione su `_discovery/graphics_test_
 - Confronto Blender 4 s su sei scene: Adaptive, Highlight, Decoupled.
 - Tre round Guess (Balatro, Witcher 3, Nier) e montaggio 27 s 1080x1920 con titolo/musica/cuts.
 - Auto e GUI non toccati; nessuna campagna 25 shot. Dettagli: docs/ASCII_MILESTONE8_2.md.
+
+## Milestone 9 — Guess ASCII Production Workflow (2026-11-25)
+
+- Shot context reale per shot, persistente su disco e non riusato da mappe parziali di anteprima.
+- Cache decoupled validata pixel-per-pixel, hash del contenuto di mappe e movie, keyframe senza scene.frame_set.
+- Timeline 30 fps verificata con sorgente 60 fps; palette e Color Mode usati dal renderer e dalle mappe decoupled.
+- ClipEntry.ascii per ogni indizio: renderer, modalità, densità, palette, intervallo, output, stato, fingerprint e cache.
+- GUI: editor Indizio ASCII con originale/import, anteprima, confronto tre modalità, stop/ripresa, approvazione; reveal originale.
+- Montaggio integrato con gcf/guess/short.py; tre round reali 810 frame/27.0 s.
+- Rigenerazione selettiva reale: cambia solo la clip modificata, il suo round e il montaggio.
+- Collaudo 6 giochi/60 s strutturale su fixture: 1800 frame, 60.0 s, 1080x1920, AAC, metadata senza titoli; accettazione editoriale bloccata da tre giochi reali disponibili.
+- Auto non rieseguito; preset v2 e BlueFox intatti. Dettagli: docs/ASCII_MILESTONE9.md.

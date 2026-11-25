@@ -96,7 +96,7 @@ def resolve(project) -> dict:
     by_name["Color Mode"] = float(user.get("color_mode", by_name["Color Mode"]))
     by_name["Character Ramp"] = by_name.get("Character Ramp", " .,:;+HW@")
     by_name["White Point"] = float(by_name.get("White Point", 0.95))
-    by_name["Palette Mix"] = 0.0
+    by_name["Palette Mix"] = float(user.get("palette", 0.0))
     return {
         "name": PRESET_NAME,
         "renderer": renderer(project),
@@ -114,6 +114,7 @@ def resolve(project) -> dict:
         "contrast_high": by_name["Contrast High"],
         "local_contrast": by_name["Local Contrast"],
         "color_mode": by_name["Color Mode"],
+        "palette": by_name["Palette Mix"],
         "density": grid["cols"] if project.format == "vertical" else grid["rows"],
         "sockets": by_name,
     }
@@ -132,6 +133,7 @@ def expected(project, plan: dict | None = None) -> dict:
         "contrast_high": data["contrast_high"],
         "local_contrast": data["local_contrast"],
         "color_mode": data["color_mode"],
+        "palette_mix": data["palette"],
         "shadow": data["shadow"],
         "white": data["white"],
         "source_frame_scale": round((project.working_info.get("fps", 30.0) / 30.0), 6) if project.working_info else None,

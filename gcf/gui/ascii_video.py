@@ -130,6 +130,9 @@ class AsciiVideoPage(QWidget):
         self.color_combo = QComboBox()
         self.color_combo.addItem("Cinematic Amber", 1.0)
         self.color_combo.addItem("Original RGB", 0.0)
+        self.palette_combo = QComboBox()
+        self.palette_combo.addItem("Amber", 0.0)
+        self.palette_combo.addItem("Steel Blue", 1.0)
         self.interval_combo = QComboBox()
         self.interval_combo.addItem("Tutto il video", "full")
         self.interval_combo.addItem("Solo intervallo", "range")
@@ -171,7 +174,7 @@ class AsciiVideoPage(QWidget):
             ("Inizio", self.start_spin, "Durata", self.duration_spin),
             ("Gamma", self.gamma_spin, "Ombre", self.shadow_spin),
             ("Contrasto alto", self.contrast_spin, "Densita", self.density_spin),
-            ("YouTube", self.bitrate_spin, "", None),
+            ("Palette", self.palette_combo, "YouTube", self.bitrate_spin),
         ]
         for r, (l1, w1, l2, w2) in enumerate(fields):
             a = QLabel(l1); a.setObjectName("muted"); grid.addWidget(a, r, 0)
@@ -334,6 +337,8 @@ class AsciiVideoPage(QWidget):
         self.density_spin.setValue(int(params.get("density", 54)))
         color = int(round(float(params.get("color_mode", 1.0))))
         self.color_combo.setCurrentIndex(0 if color == 1 else 1)
+        palette = int(round(float(params.get("palette", 0.0))))
+        self.palette_combo.setCurrentIndex(1 if palette else 0)
         self.bitrate_spin.setValue(int(params.get("youtube_mbps", 8)))
         self._refresh_density()
         self.source_edit.setText(project.source)
@@ -396,6 +401,7 @@ class AsciiVideoPage(QWidget):
             "contrast_high": float(self.contrast_spin.value()),
             "density": int(self.density_spin.value()),
             "color_mode": float(self.color_combo.currentData()),
+            "palette": float(self.palette_combo.currentData()),
             "youtube_mbps": int(self.bitrate_spin.value()),
         }
 

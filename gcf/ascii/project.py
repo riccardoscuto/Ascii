@@ -14,6 +14,7 @@ DEFAULT_PARAMS = {
     "contrast_high": 0.85,
     "density": 54,
     "color_mode": 1.0,
+    "palette": 0.0,
     "youtube_mbps": 8,
 }
 
@@ -65,18 +66,22 @@ class AsciiProject:
                params: dict | None = None, title: str = "ASCII Video",
                ascii_mode: str = "legacy", renderer: str = "v2",
                spatial_variant: str = "d",
-               overrides: dict | None = None) -> "AsciiProject":
-        root = ROOT / "projects"
-        root.mkdir(parents=True, exist_ok=True)
-        base = "ascii_" + datetime.now().strftime("%Y%m%d_%H%M%S")
-        candidate = base
-        n = 1
-        while (root / candidate).exists():
-            candidate = f"{base}_{n:02d}"
-            n += 1
-        path = root / candidate
+               overrides: dict | None = None,
+               path: Path | None = None) -> "AsciiProject":
+        if path is None:
+            root = ROOT / "projects"
+            root.mkdir(parents=True, exist_ok=True)
+            base = "ascii_" + datetime.now().strftime("%Y%m%d_%H%M%S")
+            candidate = base
+            n = 1
+            while (root / candidate).exists():
+                candidate = f"{base}_{n:02d}"
+                n += 1
+            path = root / candidate
+        path = Path(path)
+        path.mkdir(parents=True, exist_ok=True)
         p = cls(
-            id=candidate,
+            id=path.name,
             path=path,
             source=str(source),
             title=title,

@@ -23,8 +23,8 @@ DEFAULT_PRESET = {
     "name": "guess_default",
     "font": "assets/fonts/Montserrat-Variable.ttf",
     "number": {
-        "font_size": 116, "x": 72, "y": 300, "anchor": "lt",
-        "color": [255, 255, 255, 255], "outline": [0, 0, 0, 255], "stroke": 8,
+        "font_size": 64, "x": 64, "y": 220, "anchor": "lt",
+        "color": [255, 255, 255, 230], "outline": [0, 0, 0, 255], "stroke": 4,
     },
     "title": {
         "font_size": 120, "y": 1000, "max_width": 940,
@@ -34,7 +34,7 @@ DEFAULT_PRESET = {
         "font_size": 104, "center_y": 880, "max_width": 800, "line_gap": 18,
         "color": [255, 255, 255, 255], "highlight_color": [0, 183, 255, 255],
         "outline": [0, 0, 0, 255], "stroke": 9,
-        "highlight_phrases": ["THE GAME"], "fade_in": 0.35, "slide_px": 28,
+        "highlight_phrases": ["ASCII"], "fade_in": 0.35, "slide_px": 28,
     },
 }
 
@@ -285,6 +285,8 @@ def build_round_segments(
             "slot_label": SLOT_LABELS[i],
             "take_id": clip.get("take_id"),
             "crop": clip.get("crop"),
+            "kind": clip.get("kind", "original"),
+            "ascii": clip.get("ascii"),
             "clip": _rel(path),
             "source_duration": info["duration"],
             "trim_start": start,

@@ -107,6 +107,29 @@ def global_index(cells: np.ndarray, centre: np.ndarray, tone: dict,
     return np.rint(c * (len(ramp) - 1)).astype(np.uint8), (c * 255.0).astype(np.uint8)
 
 
+def adjust_levels(idx: np.ndarray, tone: np.ndarray, data: dict,
+                  ramp: str = DEFAULT_RAMP) -> tuple[np.ndarray, np.ndarray]:
+    """Apply the exposed luminance controls; identity at the default values."""
+    gamma = float(data.get("gamma", 0.82))
+    shadow = float(data.get("shadow", 0.31))
+    contrast = float(data.get("contrast_high", 0.85))
+    if (abs(gamma - 0.82) < 1e-6 and abs(shadow - 0.31) < 1e-6
+            and abs(contrast - 0.85) < 1e-6):
+        return idx, tone
+    gain = max(0.25, contrast / 0.85)
+    lift = (shadow - 0.31) * 0.5
+    exponent = gamma / 0.82
+    levels = max(1, len(ramp) - 1)
+
+    def curve(values):
+        x = np.clip(values, 0.0, 1.0) ** exponent
+        return np.clip((x - 0.5) * gain + 0.5 + lift, 0.0, 1.0)
+
+    new_idx = np.rint(curve(idx.astype(np.float32) / levels) * levels).astype(np.uint8)
+    new_tone = np.clip(curve(tone.astype(np.float32) / 255.0) * 255.0, 0, 255).astype(np.uint8)
+    return new_idx, new_tone
+
+
 def _variant_values(cells: np.ndarray, base: np.ndarray, target: float,
                     variant: str) -> np.ndarray:
     detail = cells - base
@@ -429,6 +452,19 @@ def _index_root(folder: Path, end: int) -> str:
     return h.hexdigest()
 
 
+def map_content_hash(folder: Path, end: int, subdirs: tuple[str, ...] = ("idx", "tone")) -> str:
+    """Hash the actual map bytes, not only their path or size."""
+    h = hashlib.sha1()
+    for i in range(1, end + 1):
+        for sub in subdirs:
+            pattern = "i_%04d.png" if sub == "idx" else "t_%04d.png"
+            path = folder / sub / (pattern % i)
+            if not path.exists():
+                raise RuntimeError(f"Mappa mancante: {path}")
+            h.update(path.read_bytes())
+    return h.hexdigest()
+
+
 def validate_index_maps(folder: Path, end: int, cols: int, rows: int,
                         ramp: str = DEFAULT_RAMP) -> dict:
     expected = set(encoded_levels(ramp))
@@ -569,6 +605,7 @@ def ensure_maps(project, data: dict, plan: dict, end: int, kind: str = "spatial"
                     idx, tone = spatial_index(cells, base, target, data["ramp"],
                                               conservative=conservative, stats=frame_stats,
                                               variant=variant)
+                    idx, tone = adjust_levels(idx, tone, data, data["ramp"])
                 encode_index(idx, data["ramp"]).save(out_idx)
                 Image.fromarray(tone, mode="L").save(out_tone)
             done += 1

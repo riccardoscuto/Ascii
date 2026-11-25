@@ -27,7 +27,8 @@ from gcf.ascii import spatial as ascii_spatial
 from gcf.ascii import selector as ascii_selector
 from gcf.guess.cover import build_cover
 from gcf.guess.round import InsufficientMaterial
-from gcf.guess.short import build_game_round, build_short
+from gcf.guess import ascii_clip
+from gcf.guess.short import build_game_round, build_short, build_short_preview
 from gcf.gui.project import Project
 
 
@@ -210,20 +211,25 @@ def cmd_record(args) -> None:
     obs.close()
 
 
+def _guess_game_index(project, value: str) -> int:
+    if value.isdigit():
+        index = int(value) - 1
+        if index < 0 or index >= len(project.games):
+            raise SystemExit(f"Gioco fuori range: {value}")
+        return index
+    index = next(
+        (i for i, g in enumerate(project.games)
+         if g.title.casefold() == value.casefold()),
+        -1,
+    )
+    if index < 0:
+        raise SystemExit(f"Gioco non trovato: {value}")
+    return index
+
+
 def cmd_guess_round(args) -> None:
     project = Project.load(project_dir(args.project))
-    if args.game.isdigit():
-        index = int(args.game) - 1
-        if index < 0 or index >= len(project.games):
-            raise SystemExit(f"Gioco fuori range: {args.game}")
-    else:
-        index = next(
-            (i for i, g in enumerate(project.games)
-             if g.title.casefold() == args.game.casefold()),
-            -1,
-        )
-        if index < 0:
-            raise SystemExit(f"Gioco non trovato: {args.game}")
+    index = _guess_game_index(project, args.game)
     outdir = Path(args.outdir) if args.outdir else None
     manifest = build_game_round(
         project, index, outdir=outdir, number_text=args.number,
@@ -270,6 +276,8 @@ def _ascii_project(args) -> AsciiProject:
         project.params["density"] = int(args.density)
     elif args.mode == "spatial" and int(project.params.get("density", 54)) < 81:
         project.params["density"] = 81
+    if getattr(args, "palette", None) is not None:
+        project.params["palette"] = 0.0 if args.palette == "amber" else 1.0
     project.save()
     return project
 
@@ -319,6 +327,59 @@ def cmd_ascii_render(args) -> None:
     print("mode:", project.ascii_mode, "variant:", project.spatial_variant,
           "grid:", ascii_preset.grid_for(project.format, int(project.params["density"])))
     print("timings:", project.timings)
+
+
+def _guess_ascii_settings(args) -> dict:
+    return ascii_clip.normalize_settings({
+        "mode": args.mode,
+        "density": args.density,
+        "color": args.color,
+        "gamma": args.gamma,
+        "shadow": args.shadow,
+        "contrast_high": args.contrast,
+        "start": args.start,
+        "duration": args.duration,
+    })
+
+
+def cmd_guess_ascii_preview(args) -> None:
+    project = Project.load(project_dir(args.project))
+    game = project.games[_guess_game_index(project, args.game)]
+    out = ascii_clip.preview(project, game, args.slot - 1, _guess_ascii_settings(args))
+    print("preview:", out)
+    if args.open:
+        os.startfile(out)
+
+
+def cmd_guess_ascii_convert(args) -> None:
+    project = Project.load(project_dir(args.project))
+    game = project.games[_guess_game_index(project, args.game)]
+    data = ascii_clip.convert(project, game, args.slot - 1, _guess_ascii_settings(args))
+    print("ascii:", data.get("output"))
+    print("status:", data.get("status"), "cached:", data.get("cached", False))
+    print("fingerprint:", data.get("fingerprint"))
+    if args.approve:
+        ascii_clip.approve(project, game, args.slot - 1)
+        print("approved")
+
+
+def cmd_guess_ascii_compare(args) -> None:
+    project = Project.load(project_dir(args.project))
+    game = project.games[_guess_game_index(project, args.game)]
+    out = ascii_clip.compare(project, game, args.slot - 1, _guess_ascii_settings(args))
+    print("compare:", out)
+    if args.open:
+        os.startfile(out)
+
+
+def cmd_guess_ascii_rounds(args) -> None:
+    manifest = build_short_preview(args.project, games=args.games)
+    out = ROOT / manifest["output"]
+    print("preview:", out)
+    print("frames:", manifest["frames"])
+    print("duration:", manifest["duration"])
+    if args.open:
+        os.startfile(out)
 
 
 def cmd_guess_short(args) -> None:
@@ -410,6 +471,39 @@ def build_parser() -> argparse.ArgumentParser:
     cv.add_argument("--open", action="store_true")
     cv.set_defaults(func=cmd_guess_cover)
 
+    def guess_ascii_common(sp):
+        sp.add_argument("--project", required=True)
+        sp.add_argument("--game", required=True, help="game title or 1-based index")
+        sp.add_argument("--slot", type=int, required=True, choices=[1, 2, 3])
+        sp.add_argument("--mode", choices=list(ascii_clip.MODES), default="adaptive")
+        sp.add_argument("--density", type=int, default=81)
+        sp.add_argument("--color", choices=list(ascii_clip.COLORS), default="original")
+        sp.add_argument("--gamma", type=float, default=0.82)
+        sp.add_argument("--shadow", type=float, default=0.31)
+        sp.add_argument("--contrast", type=float, default=0.85)
+        sp.add_argument("--start", type=float, default=None)
+        sp.add_argument("--duration", type=float, default=2.0)
+        sp.add_argument("--open", action="store_true")
+
+    ac = guess_sub.add_parser("ascii-preview", help="preview one ASCII clue")
+    guess_ascii_common(ac)
+    ac.set_defaults(func=cmd_guess_ascii_preview)
+
+    acv = guess_sub.add_parser("ascii-convert", help="convert one ASCII clue")
+    guess_ascii_common(acv)
+    acv.add_argument("--approve", action="store_true")
+    acv.set_defaults(func=cmd_guess_ascii_convert)
+
+    acm = guess_sub.add_parser("ascii-compare", help="compare the three modes")
+    guess_ascii_common(acm)
+    acm.set_defaults(func=cmd_guess_ascii_compare)
+
+    ar = guess_sub.add_parser("ascii-rounds", help="build the integrated N-round preview")
+    ar.add_argument("--project", required=True)
+    ar.add_argument("--games", type=int, default=3)
+    ar.add_argument("--open", action="store_true")
+    ar.set_defaults(func=cmd_guess_ascii_rounds)
+
     sh = guess_sub.add_parser("short", help="build the full 60s Short")
     sh.add_argument("--project", required=True)
     sh.add_argument("--durations", type=parse_durations, default=None,
@@ -433,6 +527,7 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--variant", choices=["d", "conservative", "adaptive", "adaptive-conservative", "global"], default="d")
         sp.add_argument("--density", type=int, default=None,
                         help="griglia: 81 = 144x81 orizzontale")
+        sp.add_argument("--palette", choices=["amber", "steel"], default=None)
 
     ap = asc_sub.add_parser("preview", help="anteprima 4 s")
     ascii_common(ap)

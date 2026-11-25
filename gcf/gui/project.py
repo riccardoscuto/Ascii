@@ -22,6 +22,7 @@ class ClipEntry:
     monitor: int | None = None
     monitor_name: str = ""
     monitor_ffmpeg: bool = False
+    ascii: dict = field(default_factory=dict)
 
 
 def _new_clips() -> list[ClipEntry]:
@@ -52,8 +53,8 @@ class Project:
     games: list[GameEntry] = field(default_factory=list)
     current_index: int = 0
     current_clip: int = 0
-    challenge_title: str = "GUESS THE GAME FROM ITS SCENERY"
-    challenge_category: str = "Scenery"
+    challenge_title: str = "GUESS THE GAME IN ASCII"
+    challenge_category: str = "ASCII"
     cover_background: dict = field(default_factory=lambda: {"type": "auto"})
     cover_duration: float = 2.0
     cover_clip: ClipEntry = field(default_factory=ClipEntry)
@@ -69,8 +70,8 @@ class Project:
         cls,
         titles: list[str],
         title: str = "Guess the Game",
-        challenge_title: str = "GUESS THE GAME FROM ITS SCENERY",
-        challenge_category: str = "Scenery",
+        challenge_title: str = "GUESS THE GAME IN ASCII",
+        challenge_category: str = "ASCII",
         cover_background: dict | None = None,
         cover_duration: float = 2.0,
         graphics_preset: str = "",
@@ -132,8 +133,8 @@ class Project:
             games=games,
             current_index=int(data.get("current_index", 0)),
             current_clip=int(data.get("current_clip", 0)),
-            challenge_title=data.get("challenge_title", "GUESS THE GAME FROM ITS SCENERY"),
-            challenge_category=data.get("challenge_category", "Scenery"),
+            challenge_title=data.get("challenge_title", "GUESS THE GAME IN ASCII"),
+            challenge_category=data.get("challenge_category", "ASCII"),
             cover_background=data.get("cover_background", {"type": "auto"}),
             cover_duration=float(data.get("cover_duration", 2.0)),
             cover_clip=ClipEntry(**(data.get("cover_clip") or {})),
@@ -203,6 +204,51 @@ class Project:
         clip.status = "recorded"
         game.status = "recorded"
         self.save()
+
+    def ascii_dir(self, game: GameEntry, slot: int) -> Path:
+        return self.path / "ascii" / slug(game.title) / f"clue_{slot + 1}"
+
+    def ascii_project_path(self, game: GameEntry, slot: int) -> Path:
+        return self.ascii_dir(game, slot)
+
+    def ascii_mp4(self, game: GameEntry, slot: int) -> Path | None:
+        data = game.clips[slot].ascii or {}
+        path = Path(data.get("output", "")) if data.get("output") else None
+        if path and path.exists():
+            return path
+        candidate = self.ascii_project_path(game, slot) / "output" / "master.mp4"
+        return candidate if candidate.exists() else None
+
+    def set_ascii(self, game: GameEntry, slot: int, data: dict) -> None:
+        clip = game.clips[slot]
+        clip.ascii = {**(clip.ascii or {}), **data,
+                      "updated_at": datetime.now().isoformat(timespec="seconds")}
+        self.save()
+
+    def approve_ascii(self, game: GameEntry, slot: int) -> None:
+        data = dict(game.clips[slot].ascii or {})
+        data["status"] = "approved"
+        self.set_ascii(game, slot, data)
+
+    def ascii_state(self, game: GameEntry, slot: int) -> str:
+        if slot >= 3:
+            return "original" if self.clip_mp4(game, slot) else "missing"
+        clip = game.clips[slot]
+        if not clip.take_id or not self.clip_mp4(game, slot):
+            return "missing"
+        data = clip.ascii or {}
+        if data.get("dirty"):
+            return "dirty"
+        if not self.ascii_mp4(game, slot):
+            return "recorded"
+        return "approved" if data.get("status") == "approved" else "converted"
+
+    def ascii_ready_for_game(self, game: GameEntry) -> bool:
+        return (self.clip_mp4(game, 3) is not None
+                and all(self.ascii_state(game, slot) == "approved" for slot in range(3)))
+
+    def ascii_ready(self) -> bool:
+        return all(self.ascii_ready_for_game(g) for g in self.games)
 
     def accept_clip(self, game: GameEntry, slot: int) -> None:
         game.clips[slot].status = "accepted"

@@ -158,12 +158,12 @@ def main():
     if not keys:
         raise RuntimeError("Piano adattivo senza keyframe.")
     field_sockets = {
-        "shadow": ("Shadow Threshold", getattr(ins, ids["Shadow Threshold"])),
-        "white": ("White Point", getattr(ins, ids["White Point"])),
-        "gamma": ("Gamma", getattr(ins, ids["Gamma"])),
-        "contrast_low": ("Contrast Low", getattr(ins, ids["Contrast Low"])),
-        "contrast_high": ("Contrast High", getattr(ins, ids["Contrast High"])),
-        "local_contrast": ("Local Contrast", getattr(ins, ids["Local Contrast"])),
+        "shadow": ("Shadow Threshold", ids["Shadow Threshold"], getattr(ins, ids["Shadow Threshold"])),
+        "white": ("White Point", ids["White Point"], getattr(ins, ids["White Point"])),
+        "gamma": ("Gamma", ids["Gamma"], getattr(ins, ids["Gamma"])),
+        "contrast_low": ("Contrast Low", ids["Contrast Low"], getattr(ins, ids["Contrast Low"])),
+        "contrast_high": ("Contrast High", ids["Contrast High"], getattr(ins, ids["Contrast High"])),
+        "local_contrast": ("Local Contrast", ids["Local Contrast"], getattr(ins, ids["Local Contrast"])),
     }
     keyed = [field for field in field_sockets if field in keys[0]]
     try:
@@ -172,7 +172,7 @@ def main():
         pass
     for key in keys:
         for field in keyed:
-            socket = field_sockets[field][1]
+            socket = field_sockets[field][2]
             socket.value = float(key[field])
             socket.keyframe_insert(data_path="value", frame=int(key["frame"]))
     ad = obj.animation_data
@@ -188,10 +188,21 @@ def main():
     scene.frame_end = total
     checks = {}
     if not job.get("skip_frame_checks", False):
+        bag = None
+        if ad and ad.action:
+            bag = ad.action.layers[0].strips[0].channelbag(ad.action_slot)
+        fcurves = list(bag.fcurves) if bag else []
         for f in (1, max(1, total // 2), total):
-            scene.frame_set(f)
-            row = {field: round(field_sockets[field][1].value, 4) for field in keyed}
-            row["expected"] = {field: round(expected_at(keys, f, field), 4) for field in keyed}
+            row = {}
+            expected_row = {}
+            for field in keyed:
+                identifier = field_sockets[field][1]
+                curve = next((fc for fc in fcurves if identifier in fc.data_path), None)
+                if curve is None:
+                    raise RuntimeError(f"Keyframe curve assente per {field} ({identifier}).")
+                row[field] = round(float(curve.evaluate(f)), 4)
+                expected_row[field] = round(expected_at(keys, f, field), 4)
+            row["expected"] = expected_row
             checks[str(f)] = row
     for f, row in checks.items():
         for field in keyed:
@@ -211,6 +222,7 @@ def main():
         "contrast_high": round(getattr(ins, ids["Contrast High"]).value, 4),
         "local_contrast": round(getattr(ins, ids["Local Contrast"]).value, 4),
         "color_mode": round(getattr(ins, ids["Color Mode"]).value, 4),
+        "palette_mix": round(getattr(ins, ids["Palette Mix"]).value, 4),
         "source_frame_scale": round(getattr(ins, ids["Source Frame Scale"]).value, 6),
         "source_frame_offset": round(getattr(ins, ids["Source Frame Offset"]).value, 6),
         "source": str(source),
@@ -240,9 +252,10 @@ def main():
     expected = job["expected"]
     mismatches = []
     numeric = {"grid_x", "grid_y", "glyph_size", "gamma", "contrast_high", "color_mode",
-               "source_frame_scale", "source_frame_offset"}
+               "palette_mix", "source_frame_scale", "source_frame_offset"}
     for key in ("grid_x", "grid_y", "glyph_size", "resolution", "character_ramp",
-                "gamma", "contrast_low", "contrast_high", "local_contrast", "color_mode", "source_frame_scale", "source_frame_offset"):
+                "gamma", "contrast_low", "contrast_high", "local_contrast", "color_mode",
+                "palette_mix", "source_frame_scale", "source_frame_offset"):
         if key in keyed:
             continue
         if key not in expected:

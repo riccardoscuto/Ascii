@@ -2,13 +2,13 @@
   "name": "guess_default",
   "font": "assets/fonts/Montserrat-Variable.ttf",
   "number": {
-    "font_size": 116,
-    "x": 72,
-    "y": 300,
+    "font_size": 64,
+    "x": 64,
+    "y": 220,
     "anchor": "lt",
-    "color": [255, 255, 255, 255],
+    "color": [255, 255, 255, 230],
     "outline": [0, 0, 0, 255],
-    "stroke": 8
+    "stroke": 4
   },
   "title": {
     "font_size": 120,
@@ -27,7 +27,7 @@
     "highlight_color": [0, 183, 255, 255],
     "outline": [0, 0, 0, 255],
     "stroke": 9,
-    "highlight_phrases": ["THE GAME"],
+    "highlight_phrases": ["ASCII"],
     "fade_in": 0.35,
     "slide_px": 28
   }
