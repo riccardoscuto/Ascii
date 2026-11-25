@@ -98,7 +98,8 @@ def main():
         index_node.extension = "CLIP"
         ng.links.new(ng.nodes["UV Offset"].outputs["Vector"], index_node.inputs[1])
         index_node.inputs[2].default_value = 1
-        ng.links.new(ng.nodes["Scene Time"].outputs["Frame"], index_node.inputs[2])
+        if job.get("link_index_time", True):
+            ng.links.new(ng.nodes["Scene Time"].outputs["Frame"], index_node.inputs[2])
         dot_index = ng.nodes.new("ShaderNodeVectorMath")
         dot_index.name = "Index Red"
         dot_index.operation = "DOT_PRODUCT"

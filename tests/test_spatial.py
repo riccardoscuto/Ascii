@@ -147,6 +147,23 @@ class SpatialUnitTests(unittest.TestCase):
         self.assertTrue(np.all(out[:, :4] == 0))
         self.assertTrue(np.all(out[:, 4:] == 127))
 
+    def test_shot_normalisation_reads_tone_maps(self):
+        import tempfile
+        from types import SimpleNamespace
+        from PIL import Image as _Image
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "idx").mkdir()
+            (root / "tone").mkdir()
+            for i, value in enumerate((40, 80, 120), 1):
+                _Image.new("L", (8, 8), value).save(root / "idx" / f"i_{i:04d}.png")
+                _Image.new("L", (8, 8), value).save(root / "tone" / f"t_{i:04d}.png")
+            project = SimpleNamespace(spatial={"dir": str(root)})
+            norm = reference.shot_normalisation(project, 1, 3, step=1)
+            self.assertLessEqual(norm["lo"], norm["hi"])
+            self.assertEqual(norm["frames"], 3)
+            self.assertTrue(0.0 <= norm["lo"] <= 1.0)
+
     def test_temporal_flicker_separates_static_from_source_motion(self):
         black = Image.new("RGB", (320, 180), (0, 0, 0))
         white = Image.new("RGB", (320, 180), (255, 255, 255))
@@ -161,7 +178,7 @@ class SpatialUnitTests(unittest.TestCase):
         from pathlib import Path as _Path
         from PIL import Image as _Image
         with tempfile.TemporaryDirectory() as folder:
-            root = _Path(folder)
+            root = Path(folder)
             black = root / "b.png"
             gray = root / "g.png"
             _Image.new("RGB", (64, 36), (0, 0, 0)).save(black)

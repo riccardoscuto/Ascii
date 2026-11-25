@@ -1,6 +1,7 @@
 # Milestone 8 — Renderer Quality & Adaptive Reconstruction
 
 Data: 2026-11-25
+Aggiornamento: la correzione geometrica e il gate sono in docs/ASCII_MILESTONE8_1.md.
 Stato: **gate non superato, nessuna promozione automatica**. I nuovi candidati migliorano
 alcune condizioni (scurità, foreste, UI ad alta densità, alte luci), ma non sono
 uniformemente migliori e il percorso Blender approvato conserva un difetto di

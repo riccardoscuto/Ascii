@@ -536,3 +536,13 @@ Verificare copertina, numero, reveal e transizione su `_discovery/graphics_test_
 - Balatro: 192x108 migliore, 144x81 vicino, 96x54 perde testo; saturazione indici stabile ~11%.
 - Confronti anonimi 5 s in _discovery/milestone8/anonymous/; gate non superato, Auto non approvato.
 - Dettagli: docs/ASCII_MILESTONE8.md.
+
+## Milestone 8.1 — Glyph Renderer Fix (2026-11-25)
+
+- Libreria glifi indipendente (Collection Info, mesh Bfont centrate, indice 0 vuoto) e grid vertices = celle + 1.
+- Gate sintetico superato su 96x54, 144x81, 192x108 e verticali: indice 0, centro, angoli, checker, rampa, rampa riordinata, 9/9 mapping e bande colore.
+- Scoperto e documentato il secondo difetto: il preset v2 creava 143x80 celle per mappe 144x81.
+- Sequenza PNG + Scene Time crasha col nuovo grafo; validato index movie FFV1 e flag link_index_time.
+- A/B/C/D su NieR, villaggio, foresta, scuro, Balatro, bird; D Blender con mappe indice/colore/intensita validato su scuro.
+- Round editoriale Balatro 1080x1920, 30 fps, 9 s: tre clip ASCII 2 s + reveal 3 s, titolo/numero/musica Guess.
+- Auto e GUI non toccati; preset v2 approvato intatto. Dettagli: docs/ASCII_MILESTONE8_1.md.
