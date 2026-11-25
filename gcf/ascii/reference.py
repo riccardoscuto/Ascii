@@ -85,6 +85,29 @@ def _scaled_coverage(atlas: dict, cell_px: int) -> np.ndarray:
     return _scaled(atlas, cell_px).reshape(len(atlas["tiles"]), -1).mean(axis=1)
 
 
+def cell_px_for(project) -> int:
+    data = preset.resolve(project)
+    cols, rows = data["grid"]["cols"], data["grid"]["rows"]
+    width, height = data["resolution"]
+    return max(4, int(min(width // cols, height // rows)))
+
+
+_SHOT_CONTEXT_CACHE: dict = {}
+
+
+def shot_context(project) -> dict:
+    """Persistent normalisation shared by still, video and map generation."""
+    total = int(round(project.working_info["duration"] * 30))
+    key = (str(project.path), (getattr(project, "spatial", {}) or {}).get("key", ""), total)
+    if key not in _SHOT_CONTEXT_CACHE:
+        step = max(1, total // 30)
+        _SHOT_CONTEXT_CACHE[key] = {
+            "tone": shot_normalisation(project, 1, total, step=step),
+            "source": shot_source_normalisation(project, 1, total),
+        }
+    return _SHOT_CONTEXT_CACHE[key]
+
+
 def shot_normalisation(project, start_frame: int, end_frame: int,
                        step: int = 3) -> dict:
     """Tone-map percentiles over a shot, robust to flashes and short spikes."""
@@ -146,13 +169,14 @@ def shot_source_normalisation(project, start_frame: int, end_frame: int) -> dict
 
 def decoupled(indices: np.ndarray, desired: np.ndarray, source_rgb: np.ndarray,
               atlas: dict, source: Image.Image, cols: int, rows: int,
-              cell_px: int = 12, max_intensity: float = 0.98):
+              cell_px: int | None = None, max_intensity: float = 0.98):
     """Joint glyph/intensity reconstruction with final-resolution coverage.
 
     Textured cells choose the glyph whose raster best matches the source patch;
     flat cells keep the tone-derived glyph.  Intensity is solved from the
     desired cell luminance and the real coverage of that glyph at render size.
     """
+    cell_px = cell_px or cell_px_for(project)
     coverage = _scaled_coverage(atlas, cell_px)
     tiles = _scaled(atlas, cell_px)
     flat_tiles = tiles.reshape(len(tiles), -1)
@@ -168,28 +192,46 @@ def decoupled(indices: np.ndarray, desired: np.ndarray, source_rgb: np.ndarray,
     pattern_glyph = np.argmax(corr, axis=-1).astype(np.int16)
     best = np.max(corr, axis=-1)
     flat = (std < 0.018) | (best < 0.18)
-    chosen = np.where(flat, indices, pattern_glyph).astype(np.int16)
     desired = np.clip(desired, 0.0, 1.0)
-    cov = coverage[chosen]
-    intensity_flat = np.clip(desired / np.maximum(cov, 0.06), 0.05, max_intensity)
-    intensity_text = np.clip(desired, 0.05, max_intensity)
-    intensity = np.where(flat, intensity_flat, intensity_text).astype(np.float32)
+
+    def candidate(glyph, textured):
+        cov = coverage[glyph]
+        level = np.where(textured,
+                         np.clip(desired, 0.05, max_intensity),
+                         np.clip(desired / np.maximum(cov, 0.06), 0.05, max_intensity))
+        perceived = cov * level
+        tone_error = np.abs(perceived - desired)
+        pattern_error = np.where(
+            textured,
+            0.35 * (1.0 - np.clip(corr[np.arange(rows)[:, None],
+                                        np.arange(cols)[None, :], glyph], 0.0, 1.0)),
+            0.05 * np.abs(glyph - indices),
+        )
+        return (0.70 * tone_error + 0.30 * pattern_error
+                + 0.02 * glyph / max(1, len(coverage) - 1), level)
+
+    cost_pattern, level_pattern = candidate(pattern_glyph, True)
+    cost_tone, level_tone = candidate(indices, False)
+    use_pattern = (~flat) & (cost_pattern < cost_tone)
+    chosen = np.where(use_pattern, pattern_glyph, indices).astype(np.int16)
+    intensity = np.where(use_pattern, level_pattern, level_tone).astype(np.float32)
     lum = (0.2126 * source_rgb[..., 0] + 0.7152 * source_rgb[..., 1]
            + 0.0722 * source_rgb[..., 2])
-    chroma = source_rgb / np.maximum(lum[..., None], 0.02)
+    chroma = np.clip(source_rgb / np.maximum(lum[..., None], 0.02), 0.0, 1.0)
     colors = np.clip(chroma * intensity[..., None], 0.0, 1.0)
     return chosen, intensity, colors
 
 
 def write_decoupled_maps(project, start_frame: int, end_frame: int,
-                        outdir: Path) -> dict:
+                        outdir: Path, cell_px: int | None = None) -> dict:
     """Write separate index, colour and intensity maps for the Blender graph."""
     atlas = load_atlas()
     data = preset.resolve(project)
     cols, rows = data["grid"]["cols"], data["grid"]["rows"]
     size = tuple(data["resolution"])
-    norm = shot_normalisation(project, start_frame, end_frame, step=max(1, (end_frame - start_frame) // 30 + 1))
-    src_norm = shot_source_normalisation(project, start_frame, end_frame)
+    cell_px = cell_px or cell_px_for(project)
+    context = shot_context(project)
+    norm, src_norm = context["tone"], context["source"]
     idx_dir = outdir / "idx"
     col_dir = outdir / "color"
     int_dir = outdir / "intensity"
@@ -197,7 +239,9 @@ def write_decoupled_maps(project, start_frame: int, end_frame: int,
         folder.mkdir(parents=True, exist_ok=True)
     for frame in range(start_frame, end_frame + 1):
         idx, tone = read_maps(project, frame)
-        t = (frame - 1) / 30.0
+        fps = max(1.0, float(project.working_info.get("fps", 30.0)))
+        t = min((frame - 1) / 30.0,
+                max(0.0, float(project.working_info.get("duration", 4.0)) - 1.0 / fps - 0.001))
         source = extract_frame(project.working_source, t,
                                project.path / "temp" / f"dec_src_{frame:04d}.png", size)
         cells = luma.linear_cells(source, cols, rows)
@@ -207,7 +251,8 @@ def write_decoupled_maps(project, start_frame: int, end_frame: int,
         source_n = np.clip((cells - src_norm["lo"]) / max(1e-6, src_norm["hi"] - src_norm["lo"]), 0, 1)
         desired = np.clip(0.55 * tone_n + 0.45 * source_n, 0, 1) ** 0.80
         chosen, intensity, _ = decoupled(np.rint(idx / 32.0).astype(np.int16),
-                                         desired, cell_rgb, atlas, source, cols, rows, 12)
+                                         desired, cell_rgb, atlas, source, cols, rows,
+                                         cell_px)
         lum = (0.2126 * cell_rgb[..., 0] + 0.7152 * cell_rgb[..., 1]
                + 0.0722 * cell_rgb[..., 2])
         chroma = np.clip(cell_rgb / np.maximum(lum[..., None], 0.02), 0, 1)
@@ -235,11 +280,16 @@ def read_maps(project, frame: int) -> tuple[np.ndarray, np.ndarray]:
 def extract_frame(source: str | Path, t: float, out: Path,
                   size: tuple[int, int] = (1920, 1080)) -> Image.Image:
     out.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run([ffmpeg_bin(), "-y", "-v", "error", "-ss", f"{max(0.0, t):.5f}",
-                    "-i", str(source), "-frames:v", "1",
-                    "-vf", f"scale={size[0]}:{size[1]},setsar=1", str(out)],
-                   check=True)
-    return Image.open(out).convert("RGB")
+    base = max(0.0, float(t))
+    for attempt in range(4):
+        stamp = max(0.0, base - attempt * 0.04)
+        subprocess.run([ffmpeg_bin(), "-y", "-v", "error", "-ss", f"{stamp:.5f}",
+                        "-i", str(source), "-frames:v", "1",
+                        "-vf", f"scale={size[0]}:{size[1]},setsar=1", str(out)],
+                       check=False)
+        if out.exists() and out.stat().st_size:
+            return Image.open(out).convert("RGB")
+    raise RuntimeError(f"Frame non estraibile da {source} a {t:.3f}s")
 
 
 def cell_colors(source: Image.Image, cols: int, rows: int) -> np.ndarray:
@@ -249,12 +299,13 @@ def cell_colors(source: Image.Image, cols: int, rows: int) -> np.ndarray:
 
 def render_video(project, mode: str, out: Path, start_frame: int = 1,
                  end_frame: int | None = None, atlas: dict | None = None,
-                 cell_px: int = 12, progress=None) -> Path:
+                 cell_px: int | None = None, progress=None) -> Path:
     """Reference raster video; diagnostic only, never a production renderer."""
     atlas = atlas or load_atlas()
     data = preset.resolve(project)
     cols, rows = data["grid"]["cols"], data["grid"]["rows"]
     size = tuple(data["resolution"])
+    cell_px = cell_px or cell_px_for(project)
     total = int(round(project.working_info["duration"] * 30))
     end_frame = min(total, int(end_frame or total))
     count = max(0, end_frame - start_frame + 1)
@@ -272,8 +323,8 @@ def render_video(project, mode: str, out: Path, start_frame: int = 1,
                  "-i", "-", "-an", "-c:v", "libx264", "-preset", "medium",
                  "-crf", "18", "-pix_fmt", "yuv420p", "-movflags", "+faststart",
                  str(out)]
-    norm = shot_normalisation(project, start_frame, end_frame, step=max(1, count // 30))
-    src_norm = shot_source_normalisation(project, start_frame, end_frame)
+    context = shot_context(project)
+    norm, src_norm = context["tone"], context["source"]
     reader = subprocess.Popen(read_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     writer = subprocess.Popen(write_cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
@@ -321,12 +372,13 @@ def render_video(project, mode: str, out: Path, start_frame: int = 1,
 def frame_for_project(project, frame: int, atlas: dict | None = None,
                       mode: str = "pipeline", palette_rgb: np.ndarray | None = None,
                       source: Image.Image | None = None,
-                      cell_px: int = 12, size: tuple[int, int] = (1920, 1080)) -> dict:
+                      cell_px: int | None = None, size: tuple[int, int] = (1920, 1080)) -> dict:
     """Render one frame from the project's index/tone maps."""
     atlas = atlas or load_atlas()
     idx, tone = read_maps(project, frame)
     data = preset.resolve(project)
     cols, rows = data["grid"]["cols"], data["grid"]["rows"]
+    cell_px = cell_px or cell_px_for(project)
     if source is None:
         t = (frame - 1) / 30.0
         tmp = project.path / "temp" / f"ref_src_{frame:04d}.png"
@@ -334,8 +386,8 @@ def frame_for_project(project, frame: int, atlas: dict | None = None,
     indices = np.rint(idx / 32.0).astype(np.int16)
     rgb = palette_rgb if palette_rgb is not None else cell_colors(source, cols, rows)
     if mode == "decoupled":
-        norm = shot_normalisation(project, max(1, frame - 15), frame + 15, step=5)
-        src_norm = shot_source_normalisation(project, max(1, frame - 40), frame + 40)
+        context = shot_context(project)
+        norm, src_norm = context["tone"], context["source"]
         raw = tone.astype(np.float32) / 255.0
         tone_n = np.clip((raw - norm["lo"]) /
                          max(1e-6, norm["hi"] - norm["lo"]), 0.0, 1.0)

@@ -12,7 +12,7 @@ import numpy as np
 from PIL import Image
 
 from gcf.ascii import luma
-from gcf.ascii.preset import PRESET_BLEND
+from gcf.ascii.preset import PRESET_BLEND, blend_for
 
 RENDERER_VERSION = "spatial-1"
 DEFAULT_RAMP = " .,:;+HW@"
@@ -387,6 +387,8 @@ def _map_params(data: dict, plan: dict, kind: str, conservative: bool, stats: di
         out["adaptive"] = True
     if variant:
         out["variant"] = variant
+    if data.get("renderer") != "v2" and data.get("renderer_version"):
+        out["renderer_version"] = data["renderer_version"]
     return out
 
 
@@ -394,7 +396,7 @@ def map_key(project, data: dict, plan: dict, kind: str, conservative: bool,
             stats: dict, variant: str = '') -> str:
     payload = {
         "source": _sha1(Path(project.working_source)),
-        "preset": _sha1(PRESET_BLEND),
+        "preset": _sha1(blend_for(project)),
         "params": _map_params(data, plan, kind, conservative, stats, variant),
     }
     return _json_sha1(payload)
@@ -446,7 +448,8 @@ def validate_index_maps(folder: Path, end: int, cols: int, rows: int,
 
 
 def validate_renders(frames_dir: Path, maps_dir: Path, end: int, cols: int, rows: int,
-                     sample_step: int = 1) -> dict:
+                     sample_step: int = 1, normalize: bool = False,
+                     black_mean: float = 0.75) -> dict:
     """Black-frame and index/render alignment guard."""
     issues = []
     checked = 0
@@ -466,12 +469,21 @@ def validate_renders(frames_dir: Path, maps_dir: Path, end: int, cols: int, rows
         occupied = sum(1 for v in cells if v) / max(1, idx.width * idx.height)
         if occupied > 0.02 and hi < 8:
             issues.append(f"frame nero non giustificato: {i} max={hi}")
-        if occupied > 0.02 and mean < 0.75:
+        if occupied > 0.02 and mean < black_mean:
             issues.append(f"render quasi nero: {i} mean={mean:.3f}")
-        if occupied > 0.10 and mean >= 0.5:
+        if occupied > 0.10 and mean >= (20.0 if normalize else 0.5):
             small = ren.resize((cols, rows), Image.Resampling.BOX)
             values = list(small.getdata())
             index_values = list(idx.getdata())
+            if normalize:
+                def _norm(vals):
+                    ordered = sorted(vals)
+                    lo = ordered[max(0, int(len(ordered) * 0.02))]
+                    hi = ordered[min(len(ordered) - 1, int(len(ordered) * 0.98))]
+                    return [max(0.0, min(255.0, (v - lo) * 255.0 / max(1.0, hi - lo)))
+                            for v in vals]
+                values = _norm(values)
+                index_values = _norm(index_values)
             mv = sum(values) / len(values)
             mi = sum(index_values) / len(index_values)
             num = sum((a - mv) * (b - mi) for a, b in zip(values, index_values))
@@ -580,7 +592,7 @@ def ensure_maps(project, data: dict, plan: dict, end: int, kind: str = "spatial"
         "index_root": index_root,
         "source": str(project.working_source),
         "source_sha1": _sha1(Path(project.working_source)),
-        "preset_sha1": _sha1(PRESET_BLEND),
+        "preset_sha1": _sha1(blend_for(project)),
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "map_key": key,
     }
@@ -591,6 +603,78 @@ def ensure_maps(project, data: dict, plan: dict, end: int, kind: str = "spatial"
                        "target": stats.get("target", 0.0)}
     project.save()
     return manifest
+
+
+def encode_png_movie(folder: Path, pattern: str, frames: int, out: Path) -> Path:
+    """Encode a PNG sequence as a lossless FFV1 movie."""
+    from gcf.config import ffmpeg_bin
+    cmd = [ffmpeg_bin(), "-y", "-v", "error", "-framerate", "30",
+           "-start_number", "1", "-i", str(Path(folder) / pattern),
+           "-frames:v", str(frames), "-c:v", "ffv1", "-pix_fmt", "rgb24",
+           "-color_range", "pc", str(out)]
+    subprocess.run(cmd, check=True)
+    return out
+
+
+def encode_index_movie(project, frames: int, out: Path | None = None) -> Path:
+    """Encode the index PNG sequence as a lossless FFV1 movie."""
+    root = Path(project.spatial["dir"]) / "idx"
+    out = out or Path(project.spatial["dir"]) / "index_movie.mkv"
+    return encode_png_movie(root, "i_%04d.png", frames, out)
+
+
+def validate_png_movie(folder: Path, pattern: str, movie: Path, frames: int,
+                       rgb: bool = False) -> dict:
+    """Compare decoded FFV1 frames with the source PNG sequence exactly."""
+    import numpy as np
+    from PIL import Image
+    from gcf.config import ffmpeg_bin
+    first = Image.open(Path(folder) / (pattern % 1)).convert("RGB" if rgb else "L")
+    width, height = first.size
+    channels = 3 if rgb else 1
+    expected = width * height * channels
+    proc = subprocess.run([ffmpeg_bin(), "-v", "error", "-i", str(movie),
+                           "-f", "rawvideo", "-pix_fmt", "rgb24" if rgb else "gray", "-"],
+                          capture_output=True, check=True)
+    data = proc.stdout
+    if len(data) < expected * frames:
+        raise RuntimeError(f"Movie troppo corto: {len(data)} byte")
+    for frame in range(frames):
+        buf = data[frame * expected:(frame + 1) * expected]
+        got = np.frombuffer(buf, dtype=np.uint8).reshape(height, width, channels)
+        want = np.asarray(Image.open(Path(folder) / (pattern % (frame + 1)))
+                          .convert("RGB" if rgb else "L"), dtype=np.uint8)
+        if not rgb:
+            want = want[..., None]
+        if not np.array_equal(got, want):
+            diff = int(np.abs(got.astype(np.int16) - want.astype(np.int16)).max())
+            raise RuntimeError(f"Movie diverso al frame {frame + 1}: max {diff}")
+    return {"frames": frames, "exact": True, "size": [width, height], "rgb": rgb}
+
+
+def validate_index_movie(project, movie: Path, frames: int) -> dict:
+    """Decode the FFV1 index movie and compare every value to the PNG sequence."""
+    import numpy as np
+    from PIL import Image
+    from gcf.config import ffmpeg_bin
+    root = Path(project.spatial["dir"]) / "idx"
+    cols, rows = Image.open(root / "i_0001.png").size
+    expected = cols * rows * 3
+    proc = subprocess.run([ffmpeg_bin(), "-v", "error", "-i", str(movie),
+                           "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+                          capture_output=True, check=True)
+    data = proc.stdout
+    if len(data) < expected * frames:
+        raise RuntimeError(f"Index movie troppo corto: {len(data)} byte")
+    for frame in range(frames):
+        buf = data[frame * expected:(frame + 1) * expected]
+        got = np.frombuffer(buf, dtype=np.uint8).reshape(rows, cols, 3)[..., 0]
+        want = np.asarray(Image.open(root / f"i_{frame + 1:04d}.png").convert("L"),
+                          dtype=np.uint8)
+        if not np.array_equal(got, want):
+            diff = int(np.abs(got.astype(np.int16) - want.astype(np.int16)).max())
+            raise RuntimeError(f"Index movie diverso al frame {frame + 1}: max {diff}")
+    return {"frames": frames, "exact": True, "size": [cols, rows]}
 
 
 def validate_manifest(path: str | Path) -> dict:

@@ -30,8 +30,10 @@ class AsciiProject:
     preset: str = "ASCII_Cinematic_Balanced_v2_96x54"
     params: dict = field(default_factory=lambda: dict(DEFAULT_PARAMS))
     ascii_mode: str = "legacy"
+    renderer: str = "v2"
     spatial_variant: str = "d"
     spatial: dict = field(default_factory=dict)
+    decoupled: dict = field(default_factory=dict)
     grid: dict = field(default_factory=dict)
     overrides: object = field(default_factory=dict)
     timings: dict = field(default_factory=dict)
@@ -61,7 +63,8 @@ class AsciiProject:
     @classmethod
     def create(cls, source: str, fmt: str, start: float, duration: float | None,
                params: dict | None = None, title: str = "ASCII Video",
-               ascii_mode: str = "legacy", spatial_variant: str = "d",
+               ascii_mode: str = "legacy", renderer: str = "v2",
+               spatial_variant: str = "d",
                overrides: dict | None = None) -> "AsciiProject":
         root = ROOT / "projects"
         root.mkdir(parents=True, exist_ok=True)
@@ -82,6 +85,7 @@ class AsciiProject:
             interval_duration=duration,
             params={**DEFAULT_PARAMS, **(params or {})},
             ascii_mode=ascii_mode,
+            renderer=renderer,
             spatial_variant=spatial_variant,
             overrides=overrides or {},
             created_at=datetime.now().isoformat(timespec="seconds"),

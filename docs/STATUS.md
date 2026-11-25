@@ -546,3 +546,12 @@ Verificare copertina, numero, reveal e transizione su `_discovery/graphics_test_
 - A/B/C/D su NieR, villaggio, foresta, scuro, Balatro, bird; D Blender con mappe indice/colore/intensita validato su scuro.
 - Round editoriale Balatro 1080x1920, 30 fps, 9 s: tre clip ASCII 2 s + reveal 3 s, titolo/numero/musica Guess.
 - Auto e GUI non toccati; preset v2 approvato intatto. Dettagli: docs/ASCII_MILESTONE8_1.md.
+
+## Milestone 8.2 — Unified Renderer & Guess Production (2026-11-25)
+
+- Renderer selezionabile: v2, glyph-library, glyph-library-decoupled; preset v2 intatto.
+- Backend FFV1 index/color/intensity: validazione pixel esatta, stop/ripresa, cache e camera ortografica.
+- Decoupled: cella finale 13px, normalizzazione per shot condivisa, clipping coerente, costo pattern+tonale.
+- Confronto Blender 4 s su sei scene: Adaptive, Highlight, Decoupled.
+- Tre round Guess (Balatro, Witcher 3, Nier) e montaggio 27 s 1080x1920 con titolo/musica/cuts.
+- Auto e GUI non toccati; nessuna campagna 25 shot. Dettagli: docs/ASCII_MILESTONE8_2.md.

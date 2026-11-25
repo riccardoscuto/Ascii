@@ -263,6 +263,8 @@ def cmd_gui(_args) -> None:
 def _ascii_project(args) -> AsciiProject:
     project = AsciiProject.load(Path(args.project))
     project.ascii_mode = args.mode
+    if getattr(args, "renderer", None):
+        project.renderer = args.renderer
     project.spatial_variant = args.variant
     if args.density:
         project.params["density"] = int(args.density)
@@ -426,6 +428,8 @@ def build_parser() -> argparse.ArgumentParser:
     def ascii_common(sp):
         sp.add_argument("--project", required=True)
         sp.add_argument("--mode", choices=["legacy", "spatial", "auto"], default="legacy")
+        sp.add_argument("--renderer", choices=["v2", "glyph-library", "glyph-library-decoupled"],
+                        default="v2")
         sp.add_argument("--variant", choices=["d", "conservative", "adaptive", "adaptive-conservative", "global"], default="d")
         sp.add_argument("--density", type=int, default=None,
                         help="griglia: 81 = 144x81 orizzontale")

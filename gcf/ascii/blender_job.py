@@ -76,21 +76,36 @@ def main():
     spatial_info = job.get("spatial") or {}
     index_first = None
     index_count = 0
+    index_movie = None
+    color_movie = None
+    intensity_movie = None
     if ascii_mode == "spatial":
-        index_dir = Path(spatial_info["index_dir"])
-        index_files = sorted(index_dir.glob("i_*.png"))
         required = int(job.get("index_required", job["total_frames"]))
-        if len(index_files) < required:
-            raise RuntimeError(f"Index sequence incomplete: {len(index_files)}/{required}")
-        index_first = index_files[0]
-        index_img = bpy.data.images.load(str(index_first), check_existing=False)
-        index_img.source = "SEQUENCE"
-        try:
-            index_img.frame_duration = len(index_files)
-        except Exception:
-            pass
-        index_img.colorspace_settings.name = "Non-Color"
-        index_count = len(index_files)
+        index_movie = spatial_info.get("index_movie")
+        if index_movie:
+            index_first = Path(index_movie)
+            index_img = bpy.data.images.load(str(index_first), check_existing=False)
+            index_img.source = "MOVIE"
+            try:
+                index_img.frame_duration = int(job["total_frames"])
+            except Exception:
+                pass
+            index_img.colorspace_settings.name = "Non-Color"
+            index_count = required
+        else:
+            index_dir = Path(spatial_info["index_dir"])
+            index_files = sorted(index_dir.glob("i_*.png"))
+            if len(index_files) < required:
+                raise RuntimeError(f"Index sequence incomplete: {len(index_files)}/{required}")
+            index_first = index_files[0]
+            index_img = bpy.data.images.load(str(index_first), check_existing=False)
+            index_img.source = "SEQUENCE"
+            try:
+                index_img.frame_duration = len(index_files)
+            except Exception:
+                pass
+            index_img.colorspace_settings.name = "Non-Color"
+            index_count = len(index_files)
         index_node = ng.nodes.new("GeometryNodeImageTexture")
         index_node.name = "Index Map"
         index_node.inputs[0].default_value = index_img
@@ -98,7 +113,7 @@ def main():
         index_node.extension = "CLIP"
         ng.links.new(ng.nodes["UV Offset"].outputs["Vector"], index_node.inputs[1])
         index_node.inputs[2].default_value = 1
-        if job.get("link_index_time", True):
+        if job.get("link_index_time", True) and not index_movie:
             ng.links.new(ng.nodes["Scene Time"].outputs["Frame"], index_node.inputs[2])
         dot_index = ng.nodes.new("ShaderNodeVectorMath")
         dot_index.name = "Index Red"
@@ -109,6 +124,23 @@ def main():
         for link in list(mr.inputs[0].links):
             ng.links.remove(link)
         ng.links.new(dot_index.outputs["Value"], mr.inputs[0])
+
+        color_movie = spatial_info.get("color_movie")
+        intensity_movie = spatial_info.get("intensity_movie")
+        if color_movie:
+            color_img = bpy.data.images.load(str(color_movie), check_existing=False)
+            color_img.source = "MOVIE"
+            color_img.colorspace_settings.name = "sRGB"
+            if "Color Map" not in ng.nodes:
+                raise RuntimeError("Preset decoupled senza Color Map.")
+            ng.nodes["Color Map"].inputs[0].default_value = color_img
+        if intensity_movie:
+            intensity_img = bpy.data.images.load(str(intensity_movie), check_existing=False)
+            intensity_img.source = "MOVIE"
+            intensity_img.colorspace_settings.name = "Non-Color"
+            if "Intensity Map" not in ng.nodes:
+                raise RuntimeError("Preset decoupled senza Intensity Map.")
+            ng.nodes["Intensity Map"].inputs[0].default_value = intensity_img
 
     scene.render.engine = "BLENDER_EEVEE"
     scene.eevee.taa_render_samples = 8
@@ -155,11 +187,12 @@ def main():
     scene.frame_start = 1
     scene.frame_end = total
     checks = {}
-    for f in (1, max(1, total // 2), total):
-        scene.frame_set(f)
-        row = {field: round(field_sockets[field][1].value, 4) for field in keyed}
-        row["expected"] = {field: round(expected_at(keys, f, field), 4) for field in keyed}
-        checks[str(f)] = row
+    if not job.get("skip_frame_checks", False):
+        for f in (1, max(1, total // 2), total):
+            scene.frame_set(f)
+            row = {field: round(field_sockets[field][1].value, 4) for field in keyed}
+            row["expected"] = {field: round(expected_at(keys, f, field), 4) for field in keyed}
+            checks[str(f)] = row
     for f, row in checks.items():
         for field in keyed:
             if abs(row[field] - row["expected"][field]) > 0.002:
@@ -196,6 +229,9 @@ def main():
         "index_first": index_first.name if index_first else "",
         "index_count": index_count,
         "index_colorspace": "Non-Color" if index_first else "",
+        "index_movie": str(index_first) if index_movie else "",
+        "color_movie": str(color_movie) if color_movie else "",
+        "intensity_movie": str(intensity_movie) if intensity_movie else "",
         "index_required": int(job.get("index_required", total)),
     }
     verification = Path(job["verification"])

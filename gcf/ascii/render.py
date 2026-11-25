@@ -87,7 +87,8 @@ def _signature(project, params: dict, plan: dict) -> str:
     payload = {
         "source_path": project.source,
         "source_sha1": _file_sha1(project.working_source),
-        "preset_sha1": _file_sha1(PRESET_BLEND),
+        "preset_sha1": _file_sha1(preset.blend_for(project)),
+        "renderer": preset.renderer(project),
         "format": project.format,
         "start": project.interval_start,
         "duration": project.interval_duration,
@@ -104,7 +105,10 @@ def _signature(project, params: dict, plan: dict) -> str:
         "variant": variant,
         "map_key": maps.get("key"),
         "map_root": maps.get("index_root"),
-        "renderer_version": spatial.RENDERER_VERSION if mode == "spatial" else "legacy-1",
+        "renderer_version": preset.renderer_version(project),
+        "decoupled": {k: [str(v), Path(v).stat().st_size if Path(v).exists() else 0]
+                      for k, v in (getattr(project, "decoupled", {}) or {}).items()
+                      if k.endswith("movie")},
     }
     return hashlib.sha1(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
 
@@ -112,7 +116,8 @@ def _signature(project, params: dict, plan: dict) -> str:
 def _plan_context(project, data: dict, analysis_grid: tuple[int, int]) -> str:
     payload = {
         "source_sha1": _file_sha1(project.working_source),
-        "preset_sha1": _file_sha1(PRESET_BLEND),
+        "preset_sha1": _file_sha1(preset.blend_for(project)),
+        "renderer": preset.renderer(project),
         "params": {k: v for k, v in project.params.items() if k != "youtube_mbps"},
         "grid": [data["grid"]["cols"], data["grid"]["rows"]],
         "analysis_grid": [int(analysis_grid[0]), int(analysis_grid[1])],
@@ -161,7 +166,7 @@ def prepare(project, progress=None) -> dict:
                     "glyph": data["grid"]["glyph"], "resolution": list(data["resolution"])}
     project.overrides = project.params.get("correction_overrides") or {}
     project.ascii_mode = ascii_mode
-    project.renderer_version = spatial.RENDERER_VERSION if ascii_mode == "spatial" else "legacy-1"
+    project.renderer_version = preset.renderer_version(project)
     project.timings["prepare"] = round(time.time() - started, 3)
     project.save()
     return {"params": data, "plan": plan, "mode": ascii_mode, "variant": _variant(project)}
@@ -180,6 +185,7 @@ def _job_payload(project, data: dict, plan: dict, mode: str, total: int,
     spatial_info = {}
     if ascii_mode == "spatial":
         root = Path(maps["dir"])
+        decoupled = getattr(project, "decoupled", {}) or {}
         spatial_info = {
             "dir": str(root),
             "index_dir": str(root / "idx"),
@@ -191,6 +197,16 @@ def _job_payload(project, data: dict, plan: dict, mode: str, total: int,
             "conservative": bool(maps.get("conservative", False)),
             "target": maps.get("target", 0.0),
         }
+        if decoupled:
+            spatial_info.update({
+                "index_movie": decoupled.get("index_movie", ""),
+                "color_movie": decoupled.get("color_movie", ""),
+                "intensity_movie": decoupled.get("intensity_movie", ""),
+                "link_index_time": False,
+            })
+        elif maps.get("index_movie"):
+            spatial_info["index_movie"] = maps["index_movie"]
+            spatial_info["link_index_time"] = False
     return {
         "mode": mode,
         "ascii_mode": ascii_mode,
@@ -214,6 +230,7 @@ def _job_payload(project, data: dict, plan: dict, mode: str, total: int,
         "start_frame": start_frame,
         "end_frame": int(end_frame if end_frame is not None else total),
         "index_required": int(index_required if index_required is not None else total),
+        "skip_frame_checks": preset.renderer(project) != "v2",
     }
 
 
@@ -222,7 +239,7 @@ def _run_blender(project, payload: dict, total: int, frames_dir: Path,
     job_path = project.path / "temp" / f"job_{payload['mode']}.json"
     job_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     preset_copy = project.path / "temp" / "preset_work.blend"
-    shutil.copy2(preset.PRESET_BLEND, preset_copy)
+    shutil.copy2(preset.blend_for(project), preset_copy)
     log_path = project.path / "render.log"
     cmd = [blender_bin(), "-b", "--factory-startup", str(preset_copy),
            "--python", str(BLENDER_JOB), "--", str(job_path)]
@@ -274,6 +291,12 @@ def _read_verification(project, path: Path, payload: dict | None = None) -> dict
                 raise RuntimeError("Sequenza indici incompleta nella verifica.")
             if data.get("index_colorspace") != "Non-Color":
                 raise RuntimeError("Colore degli indici non Non-Color.")
+            if maps.get("index_movie") and data.get("index_movie") != maps.get("index_movie"):
+                raise RuntimeError("Movie indice non coerente nella verifica.")
+            if maps.get("color_movie") and data.get("color_movie") != maps.get("color_movie"):
+                raise RuntimeError("Movie colore non coerente nella verifica.")
+            if maps.get("intensity_movie") and data.get("intensity_movie") != maps.get("intensity_movie"):
+                raise RuntimeError("Movie intensità non coerente nella verifica.")
     return data
 
 
@@ -298,12 +321,55 @@ def _ensure_maps(project, data: dict, plan: dict, end: int,
         if cancel is not None and cancel.is_set():
             raise AsciiCanceled("Generazione mappe interrotta.") from exc
         raise
+
+    renderer = preset.renderer(project)
+    if renderer in ("glyph-library", "glyph-library-decoupled"):
+        movie = Path(project.spatial["dir"]) / "index_movie.mkv"
+        if (not movie.exists()
+                or int(project.spatial.get("index_movie_frames", 0)) != end):
+            spatial.encode_index_movie(project, end, movie)
+            spatial.validate_index_movie(project, movie, end)
+            project.spatial["index_movie_frames"] = end
+        else:
+            spatial.validate_index_movie(project, movie, end)
+        project.spatial["index_movie"] = str(movie)
+        if renderer == "glyph-library-decoupled":
+            key = str(project.spatial.get("key", ""))
+            cached = getattr(project, "decoupled", {}) or {}
+            if cached.get("map_key") != key or int(cached.get("frames", 0)) != end:
+                from gcf.ascii import reference
+                ddir = project.path / "temp" / "decoupled"
+                maps = reference.write_decoupled_maps(project, 1, end, ddir)
+                idx_movie = ddir / "index_movie.mkv"
+                color_movie = ddir / "color_movie.mkv"
+                intensity_movie = ddir / "intensity_movie.mkv"
+                spatial.encode_png_movie(Path(maps["idx"]), "i_%04d.png", end, idx_movie)
+                spatial.encode_png_movie(Path(maps["color"]), "c_%04d.png", end, color_movie)
+                spatial.encode_png_movie(Path(maps["intensity"]), "t_%04d.png", end, intensity_movie)
+                spatial.validate_png_movie(Path(maps["idx"]), "i_%04d.png", idx_movie, end)
+                spatial.validate_png_movie(Path(maps["color"]), "c_%04d.png", color_movie, end, rgb=True)
+                spatial.validate_png_movie(Path(maps["intensity"]), "t_%04d.png", intensity_movie, end)
+                project.decoupled = {
+                    "map_key": key, "frames": end, "dir": str(ddir),
+                    "idx_dir": maps["idx"], "color_dir": maps["color"],
+                    "intensity_dir": maps["intensity"],
+                    "index_movie": str(idx_movie),
+                    "color_movie": str(color_movie),
+                    "intensity_movie": str(intensity_movie),
+                }
+            else:
+                project.decoupled = cached
+        else:
+            project.decoupled = {}
     project.timings["maps"] = round(time.time() - started, 3)
     project.save()
     return manifest
 
 
 def _maps_path(project) -> Path:
+    decoupled = getattr(project, "decoupled", {}) or {}
+    if decoupled.get("dir") and "decoupled" in preset.renderer(project):
+        return Path(decoupled["dir"])
     return Path(project.spatial["dir"])
 
 
@@ -345,7 +411,9 @@ def preview(project, progress=None, cancel=None) -> Path:
     _read_verification(project, verification, payload)
     if _mode(project) == "spatial":
         spatial.validate_renders(frames, _maps_path(project), preview_frames,
-                                 data["grid"]["cols"], data["grid"]["rows"])
+                                 data["grid"]["cols"], data["grid"]["rows"],
+                                 normalize=preset.renderer(project) != "v2",
+                                 black_mean=0.05 if preset.renderer(project) != "v2" else 0.75)
     out = project.path / "preview" / "preview.mp4"
     _progress(progress, preview_frames, preview_frames, 0, "Codifica anteprima")
     media.encode_frames(project, frames, out, kind="preview")
@@ -401,7 +469,9 @@ def render(project, progress=None, cancel=None) -> dict:
     if _mode(project) == "spatial":
         step = 1 if total <= 900 else max(1, total // 450)
         spatial.validate_renders(frames, _maps_path(project), total,
-                                 data["grid"]["cols"], data["grid"]["rows"], sample_step=step)
+                                 data["grid"]["cols"], data["grid"]["rows"], sample_step=step,
+                                 normalize=preset.renderer(project) != "v2",
+                                 black_mean=0.05 if preset.renderer(project) != "v2" else 0.75)
     _progress(progress, total, total, 0, "Codifica master")
     started = time.time()
     master = media.encode_frames(project, frames, project.master_path, kind="master")

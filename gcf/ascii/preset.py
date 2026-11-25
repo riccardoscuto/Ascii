@@ -8,6 +8,42 @@ from gcf.config import ROOT
 PRESET_NAME = "ASCII_Cinematic_Balanced_v2_96x54"
 PRESET_JSON = ROOT / "ascii" / "presets" / f"{PRESET_NAME}.json"
 PRESET_BLEND = ROOT / "ascii" / "presets" / f"{PRESET_NAME}.blend"
+GLYPH_LIBRARY_BLEND = ROOT / "ascii" / "presets" / "experimental" / "ASCII_M8_2_GlyphLibrary.blend"
+DECOUPLED_BLEND = ROOT / "ascii" / "presets" / "experimental" / "ASCII_M8_2_Decoupled.blend"
+RENDERERS = {
+    "v2": PRESET_BLEND,
+    "glyph-library": GLYPH_LIBRARY_BLEND,
+    "glyph-library-decoupled": DECOUPLED_BLEND,
+}
+RENDERER_VERSIONS = {
+    "v2": "v2-1",
+    "glyph-library": "glyph-library-2",
+    "glyph-library-decoupled": "glyph-library-decoupled-2",
+}
+RENDERER_ALIASES = {
+    "approved": "v2",
+    "glyph": "glyph-library",
+    "decoupled": "glyph-library-decoupled",
+}
+
+
+def renderer(project) -> str:
+    value = str(getattr(project, "renderer", "v2") or "v2")
+    value = RENDERER_ALIASES.get(value, value)
+    if value not in RENDERERS:
+        raise RuntimeError(f"Renderer ASCII non valido: {value}")
+    return value
+
+
+def blend_for(project) -> Path:
+    path = RENDERERS[renderer(project)]
+    if not path.exists():
+        raise FileNotFoundError(f"Preset renderer assente: {path}")
+    return path
+
+
+def renderer_version(project) -> str:
+    return RENDERER_VERSIONS[renderer(project)]
 
 # The v2 grid plane: 16:9 horizontal, swapped for 9:16 vertical.
 PLANE_X = 1.775625467300415
@@ -63,7 +99,9 @@ def resolve(project) -> dict:
     by_name["Palette Mix"] = 0.0
     return {
         "name": PRESET_NAME,
-        "preset_blend": str(PRESET_BLEND),
+        "renderer": renderer(project),
+        "renderer_version": renderer_version(project),
+        "preset_blend": str(blend_for(project)),
         "format": project.format,
         "grid": grid,
         "resolution": grid["resolution"],

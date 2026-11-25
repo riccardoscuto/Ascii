@@ -187,6 +187,22 @@ class SpatialUnitTests(unittest.TestCase):
             self.assertFalse(selector._source_stats([gray])["black"])
             self.assertGreater(selector._source_stats([gray])["p50"], 0.1)
 
+    def test_renderer_selection_and_decoupled_cell_size(self):
+        from types import SimpleNamespace
+        for name, version in (("v2", "v2-1"),
+                              ("glyph-library", "glyph-library-2"),
+                              ("glyph-library-decoupled", "glyph-library-decoupled-2")):
+            project = SimpleNamespace(format="horizontal", params={"density": 81},
+                                      renderer=name)
+            data = preset.resolve(project)
+            self.assertEqual(data["renderer"], name)
+            self.assertEqual(data["renderer_version"], version)
+            self.assertTrue(Path(data["preset_blend"]).exists())
+            self.assertEqual(preset.renderer_version(project), version)
+        project = SimpleNamespace(format="horizontal", params={"density": 81},
+                                  renderer="glyph-library-decoupled")
+        self.assertEqual(reference.cell_px_for(project), 13)
+
     def test_selector_vertical_resolution(self):
         self.assertEqual(selector._resolution("horizontal"), (1920, 1080))
         self.assertEqual(selector._resolution("vertical"), (1080, 1920))
